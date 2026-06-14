@@ -1,0 +1,9 @@
+build/
+models/*.gguf
+models/hf/
+.venv/
+.DS_Store
+*.o
+*.a
+app/.build
+app/dist
