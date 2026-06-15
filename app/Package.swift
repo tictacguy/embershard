@@ -60,7 +60,8 @@ let package = Package(
             path: "Sources/EmberShardApp",
             exclude: ["Resources/Info.plist"],
             resources: [
-                .process("Resources"),
+                .copy("Resources/ProviderIcons"),
+                .process("Resources/logo.svg"),
             ]
         ),
     ]

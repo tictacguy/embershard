@@ -27,6 +27,20 @@ typedef enum {
     ES_STATUS_OOM        = 5,
 } ESStatus;
 
+// KV cache quantization level
+typedef enum {
+    ES_KV_QUANT_F16  = 0,   // full precision (default)
+    ES_KV_QUANT_Q8_0 = 1,   // ~50% memory reduction
+    ES_KV_QUANT_Q4_0 = 2,   // ~75% memory reduction
+} ESKVQuantType;
+
+// Agent pipeline stages
+typedef enum {
+    ES_STAGE_PLANNING  = 0,
+    ES_STAGE_EXECUTING = 1,
+    ES_STAGE_REVIEWING = 2,
+} ESAgentStage;
+
 typedef struct {
     const char *model_path;     // path to the .gguf file
     int32_t     n_ctx;          // context window size (default 4096)
@@ -34,6 +48,7 @@ typedef struct {
     int32_t     n_threads;      // CPU threads (0 = auto)
     float       temperature;    // 0.0 = greedy
     float       top_p;          // nucleus sampling (0.95 default)
+    ESKVQuantType kv_quant;     // KV cache quantization (default F16)
     // Called during model loading with progress in [0.0, 1.0]. Return false to abort.
     bool (*on_progress)(float progress, void *user_data);
     void *progress_ud;
@@ -48,23 +63,11 @@ typedef struct {
 
 // ── Lifecycle ─────────────────────────────────────────────────────────────────
 
-// Creates the engine and loads the model. Blocks until loaded.
-// Returns ES_STATUS_OK on success; *out_engine is valid only on success.
 ESStatus es_create(const ESConfig *config, ESEngineRef *out_engine);
-
-// Frees the engine and all associated resources.
-void es_destroy(ESEngineRef engine);
+void     es_destroy(ESEngineRef engine);
 
 // ── Generation ────────────────────────────────────────────────────────────────
 
-// Starts a NEW conversation (resets KV cache) and generates a response.
-// system_prompt: optional role description (NULL = no system prompt).
-// user_text:     user message.
-// max_tokens:    max tokens to generate.
-// on_token:      called for each generated text piece (from the calling thread).
-// on_done:       called when generation ends (status = OK or CANCELLED).
-// user_data:     passed through to both callbacks.
-// BLOCKS until done or cancelled. Call from a background thread.
 ESStatus es_generate(ESEngineRef  engine,
                      const char  *system_prompt,
                      const char  *user_text,
@@ -73,8 +76,6 @@ ESStatus es_generate(ESEngineRef  engine,
                      void (*on_done)(ESStatus status, void *ud),
                      void        *user_data);
 
-// Continues the current conversation without resetting the KV cache.
-// Appends the user turn and generates the next assistant response.
 ESStatus es_continue(ESEngineRef  engine,
                      const char  *user_text,
                      int32_t      max_tokens,
@@ -82,18 +83,27 @@ ESStatus es_continue(ESEngineRef  engine,
                      void (*on_done)(ESStatus status, void *ud),
                      void        *user_data);
 
+// ── Agentic pipeline ─────────────────────────────────────────────────────────
+// Runs Planner → Executor → Critic. on_stage fires at each stage transition.
+// on_token fires for each output piece from the Critic (final) stage.
+ESStatus es_orchestrate(ESEngineRef engine,
+                         const char *user_query,
+                         int32_t     max_tokens_per_stage,
+                         void (*on_stage)(ESAgentStage stage, void *ud),
+                         void (*on_token)(const char *piece, void *ud),
+                         void (*on_done)(ESStatus status, void *ud),
+                         void       *user_data);
+
 // ── Control ───────────────────────────────────────────────────────────────────
 
-// Thread-safe: signals the current generation to stop at the next token boundary.
 void es_cancel(ESEngineRef engine);
-
-// Resets conversation context (clears KV cache and history).
 void es_reset(ESEngineRef engine);
 
 // ── Status ────────────────────────────────────────────────────────────────────
 
 int32_t es_ctx_used(ESEngineRef engine);
 int32_t es_ctx_max(ESEngineRef engine);
+int32_t es_last_n_tokens(ESEngineRef engine);  // tokens generated in last call
 
 // ── Hardware ─────────────────────────────────────────────────────────────────
 

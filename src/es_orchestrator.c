@@ -107,6 +107,9 @@ int32_t es_orchestrator_run(es_orchestrator_t *orch, const char *user_query,
         return -1;
     }
     if (orch->verbose) fprintf(stderr, "[orch] plan (%d chars):\n%s\n", plan_len, plan);
+    // Free planner KV — its output is already in `plan` string buffer
+    es_engine_kv_seq_rm(orch->engine, orch->planner->seq_id, 0, -1);
+    orch->planner->pos = 0;
 
     // ── Stage 2: Executor ─────────────────────────────────────────────────
     // Build executor input: plan + original query
@@ -127,6 +130,9 @@ int32_t es_orchestrator_run(es_orchestrator_t *orch, const char *user_query,
         return -1;
     }
     if (orch->verbose) fprintf(stderr, "[orch] draft (%d chars):\n%s\n", draft_len, draft);
+    // Free executor KV — its output is already in `draft` string buffer
+    es_engine_kv_seq_rm(orch->engine, orch->executor->seq_id, 0, -1);
+    orch->executor->pos = 0;
 
     // ── Stage 3: Critic ───────────────────────────────────────────────────
     char *critic_input = malloc((size_t)(ES_ORCH_BUF_SIZE * 2 + strlen(user_query) + 256));

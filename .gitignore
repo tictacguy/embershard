@@ -7,3 +7,5 @@ models/hf/
 *.a
 app/.build
 app/dist
+0.1.0
+1

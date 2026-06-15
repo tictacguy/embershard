@@ -56,3 +56,23 @@ if(APPLE)
 endif()
 
 target_compile_options(embershard PRIVATE -Wall -Wextra -O2)
+
+# --- Test executable ---
+add_executable(test_engine
+    src/test_engine.c
+    ${ES_ENGINE_SOURCES}
+)
+
+target_include_directories(test_engine PRIVATE
+    include
+    vendor/llama.cpp/include
+    vendor/llama.cpp/ggml/include
+)
+
+target_link_libraries(test_engine PRIVATE llama ggml)
+
+if(APPLE)
+    target_link_libraries(test_engine PRIVATE "-framework Foundation" "-framework Metal" "-framework MetalKit")
+endif()
+
+target_compile_options(test_engine PRIVATE -Wall -Wextra -O2)

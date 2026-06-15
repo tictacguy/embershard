@@ -101,7 +101,7 @@ int32_t es_agent_run(es_agent_t *agent, const char *input,
     if (prompt_len <= 0) { free(prompt_buf); return -1; }
 
     int32_t n_ingested = es_engine_ingest_seq(agent->engine, prompt_buf,
-                                               agent->seq_id, agent->pos, true);
+                                               agent->seq_id, agent->pos, false);
     free(prompt_buf);
     if (n_ingested < 0) return -1;
     agent->pos += n_ingested;
@@ -144,7 +144,7 @@ int32_t es_agent_run_stream(es_agent_t *agent, const char *input,
     if (prompt_len <= 0) { free(prompt_buf); return -1; }
 
     int32_t n_ingested = es_engine_ingest_seq(agent->engine, prompt_buf,
-                                               agent->seq_id, agent->pos, true);
+                                               agent->seq_id, agent->pos, false);
     free(prompt_buf);
     if (n_ingested < 0) return -1;
     agent->pos += n_ingested;

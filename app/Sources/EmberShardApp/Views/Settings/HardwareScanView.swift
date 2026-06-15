@@ -104,10 +104,11 @@ struct HardwareScanView: View {
     private struct Tier { let label: String; let tier: HardwareInfo.ModelTier; let color: Color }
 
     private var tiers: [Tier] {[
-        Tier(label: "3B",  tier: .small, color: .green),
-        Tier(label: "7B",  tier: .mid,   color: .blue),
-        Tier(label: "14B", tier: .large, color: .orange),
-        Tier(label: "70B", tier: .xl,    color: .red),
+        Tier(label: "3B",  tier: .small,  color: .green),
+        Tier(label: "7B",  tier: .mid,    color: .teal),
+        Tier(label: "14B", tier: .large,  color: .blue),
+        Tier(label: "32B", tier: .xlarge, color: .orange),
+        Tier(label: "70B", tier: .xl,     color: .red),
     ]}
 
     @ViewBuilder
@@ -126,11 +127,12 @@ struct HardwareScanView: View {
 
     private func tierIndex(_ t: HardwareInfo.ModelTier) -> Int {
         switch t {
-        case .none:  return -1
-        case .small: return 0
-        case .mid:   return 1
-        case .large: return 2
-        case .xl:    return 3
+        case .none:   return -1
+        case .small:  return 0
+        case .mid:    return 1
+        case .large:  return 2
+        case .xlarge: return 3
+        case .xl:     return 4
         }
     }
 }

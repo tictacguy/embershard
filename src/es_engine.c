@@ -54,11 +54,21 @@ es_engine_t *es_engine_init(es_engine_config_t config) {
     // Context params
     struct llama_context_params ctx_params = llama_context_default_params();
     ctx_params.n_ctx = config.n_ctx;
+    ctx_params.n_seq_max = config.n_seq_max > 0 ? config.n_seq_max : 16;
     ctx_params.n_batch = config.n_batch;
     ctx_params.n_threads = config.n_threads;
     ctx_params.flash_attn_type = config.flash_attn
         ? LLAMA_FLASH_ATTN_TYPE_ENABLED
         : LLAMA_FLASH_ATTN_TYPE_DISABLED;
+
+    // KV cache quantization for memory reduction
+    if (config.kv_quant == 1) {
+        ctx_params.type_k = GGML_TYPE_Q8_0;
+        ctx_params.type_v = GGML_TYPE_Q8_0;
+    } else if (config.kv_quant == 2) {
+        ctx_params.type_k = GGML_TYPE_Q4_0;
+        ctx_params.type_v = GGML_TYPE_Q4_0;
+    }
 
     engine->ctx = llama_init_from_model(engine->model, ctx_params);
     if (!engine->ctx) {
@@ -238,6 +248,15 @@ llama_token es_engine_step_seq(es_engine_t *engine, struct llama_sampler *sample
                                 llama_seq_id seq_id, int32_t *pos) {
     if (!engine || !engine->ready || !sampler || !pos) return -1;
     if (atomic_load(&engine->cancel)) return -1;
+
+    // Context overflow protection: shift KV cache when near limit
+    if (*pos >= engine->n_ctx_max - 1) {
+        int32_t n_discard = engine->n_ctx_max / 4;
+        llama_memory_t mem = llama_get_memory(engine->ctx);
+        llama_memory_seq_rm(mem, seq_id, 0, n_discard);
+        llama_memory_seq_add(mem, seq_id, n_discard, -1, -n_discard);
+        *pos -= n_discard;
+    }
 
     llama_token token = llama_sampler_sample(sampler, engine->ctx, -1);
 

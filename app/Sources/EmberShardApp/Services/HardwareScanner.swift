@@ -11,11 +11,12 @@ struct HardwareInfo {
     let recommendedTier: ModelTier
 
     enum ModelTier: String {
-        case none  = "Not supported"
-        case small = "3B models"
-        case mid   = "7B models"
-        case large = "14B models"
-        case xl    = "70B models"
+        case none   = "Not supported"
+        case small  = "3B models"
+        case mid    = "7B models"
+        case large  = "14B models"
+        case xlarge = "32B models"
+        case xl     = "70B models"
     }
 }
 
@@ -46,8 +47,9 @@ final class HardwareScanner: ObservableObject {
         switch totalGB {
         case ..<8:   tier = .none
         case 8..<16: tier = .small
-        case 16..<32: tier = .mid
-        case 32..<64: tier = .large
+        case 16..<32: tier = .large   // M4 16GB can run 14B Q4
+        case 32..<48: tier = .xlarge
+        case 48..<64: tier = .xlarge
         default:     tier = .xl
         }
 

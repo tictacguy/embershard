@@ -1,5 +1,6 @@
 #include "es_api.h"
 #include "es_engine.h"
+#include "es_orchestrator.h"
 #include "es_kvcache.h"
 #include "es_memory.h"
 #include "llama.h"
@@ -73,11 +74,12 @@ ESStatus es_create(const ESConfig *config, ESEngineRef *out_engine) {
     es_engine_config_t inner_cfg = {
         .model_path        = config->model_path,
         .n_gpu_layers      = config->n_gpu_layers != 0 ? config->n_gpu_layers : -1,
-        .n_ctx             = config->n_ctx > 0 ? config->n_ctx : 4096,
+        .n_ctx             = config->n_ctx > 0 ? config->n_ctx : 8192,
         .n_batch           = ES_API_BATCH_SIZE,
         .n_threads         = n_threads,
         .use_mmap          = true,
         .flash_attn        = true,
+        .kv_quant          = (int32_t)config->kv_quant,
         .on_load_progress  = progress_shim,
         .load_progress_ud  = &shim_ctx,
     };
@@ -220,7 +222,7 @@ ESStatus es_generate(ESEngineRef  engine,
     int32_t fmt_len = build_formatted(eng, true, fmt, ES_API_PROMPT_CAP);
     if (fmt_len <= 0) { free(fmt); return ES_STATUS_ERR_GEN; }
 
-    int32_t n = es_engine_ingest_seq(eng->inner, fmt, 0, eng->inner->pos, true);
+    int32_t n = es_engine_ingest_seq(eng->inner, fmt, 0, eng->inner->pos, false);
     free(fmt);
     if (n < 0) return ES_STATUS_ERR_GEN;
     eng->inner->pos += n;
@@ -347,4 +349,61 @@ ESHardwareInfo es_get_hw_info(void) {
     info.cpu_cores = ncpu > 0 ? ncpu : (int32_t)sysconf(_SC_NPROCESSORS_ONLN);
 
     return info;
+}
+
+// --- Agentic pipeline ---
+
+ESStatus es_orchestrate(ESEngineRef engine,
+                         const char *user_query,
+                         int32_t     max_tokens_per_stage,
+                         void (*on_stage)(ESAgentStage stage, void *ud),
+                         void (*on_token)(const char *piece, void *ud),
+                         void (*on_done)(ESStatus status, void *ud),
+                         void       *user_data) {
+    if (!engine || !user_query) {
+        if (on_done) on_done(ES_STATUS_ERR_GEN, user_data);
+        return ES_STATUS_ERR_GEN;
+    }
+
+    ESEngine *api_eng = (ESEngine *)engine;
+    es_engine_t *eng = api_eng->inner;
+
+    // Reset engine state for orchestrator (it manages its own sequences)
+    es_engine_reset(eng);
+
+    es_orchestrator_t *orch = es_orchestrator_create(eng, false);
+    if (!orch) {
+        if (on_done) on_done(ES_STATUS_ERR_GEN, user_data);
+        return ES_STATUS_ERR_GEN;
+    }
+
+    // Signal planning stage
+    if (on_stage) on_stage(ES_STAGE_PLANNING, user_data);
+
+    char *out_buf = malloc(32768);
+    if (!out_buf) {
+        es_orchestrator_free(orch);
+        if (on_done) on_done(ES_STATUS_OOM, user_data);
+        return ES_STATUS_OOM;
+    }
+
+    // The orchestrator runs Planner -> Executor -> Critic internally
+    // We stream tokens from the critic (final) stage
+    int32_t n = es_orchestrator_run(orch, user_query, max_tokens_per_stage,
+                                     out_buf, 32768,
+                                     (es_orch_stream_cb)on_token, user_data);
+
+    es_orchestrator_free(orch);
+    free(out_buf);
+
+    eng->last_n_tokens = n > 0 ? n : 0;
+
+    ESStatus status = (n >= 0) ? ES_STATUS_OK : ES_STATUS_ERR_GEN;
+    if (on_done) on_done(status, user_data);
+    return status;
+}
+
+int32_t es_last_n_tokens(ESEngineRef engine) {
+    if (!engine) return 0;
+    return ((ESEngine *)engine)->inner->last_n_tokens;
 }

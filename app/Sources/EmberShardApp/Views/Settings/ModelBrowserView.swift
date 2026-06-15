@@ -2,68 +2,128 @@ import SwiftUI
 
 struct ModelBrowserView: View {
     @EnvironmentObject var modelStore: LocalModelStore
-    @StateObject private var downloader  = ModelDownloader.shared
-    @StateObject private var hf          = HuggingFaceService.shared
-    @StateObject private var scanner     = HardwareScanner.shared
+    @StateObject private var downloader = ModelDownloader.shared
+    @StateObject private var hf         = HuggingFaceService.shared
+    @StateObject private var scanner    = HardwareScanner.shared
 
-    @State private var filterByRAM = true
+    @State private var searchText = ""
     @State private var showFilePicker = false
+    @State private var installedExpanded = false
 
-    private var visibleModels: [HFModelEntry] {
-        guard filterByRAM, let info = scanner.info else { return hf.models }
-        return hf.models(forRAMGB: info.totalRAMGB)
+    private var maxModelSizeGB: Double {
+        guard let info = scanner.info else { return 8.0 }
+        return max(2.0, Double(info.totalRAMGB) * 0.7)
     }
 
     var body: some View {
         VStack(spacing: 0) {
-            // Toolbar
-            HStack {
-                Toggle("Show compatible only", isOn: $filterByRAM)
-                    .toggleStyle(.checkbox)
-                    .font(.subheadline)
-                Spacer()
-                Button {
-                    showFilePicker = true
-                } label: {
-                    Label("Add local file…", systemImage: "plus")
+            // Top bar
+            HStack(spacing: 8) {
+                HStack(spacing: 6) {
+                    Image(systemName: "magnifyingglass")
+                        .font(.body)
+                        .foregroundStyle(.tertiary)
+                    TextField("Search HuggingFace models...", text: $searchText)
+                        .textFieldStyle(.plain)
+                        .font(.body)
+                        .onSubmit {
+                            Task { await hf.search(query: searchText, maxSizeGB: maxModelSizeGB) }
+                        }
+                }
+                .padding(.horizontal, 10)
+                .padding(.vertical, 8)
+                .background(Color(NSColor.controlBackgroundColor), in: RoundedRectangle(cornerRadius: 8))
+
+                Button { showFilePicker = true } label: {
+                    Label("Add file", systemImage: "plus")
+                        .font(.body)
+                        .padding(.vertical, 2)
                 }
                 .buttonStyle(.bordered)
+                .help("Add a local .gguf model file from disk")
             }
             .padding(.horizontal, 16)
-            .padding(.vertical, 10)
-            .background(.bar)
+            .padding(.vertical, 12)
 
             Divider()
 
             // Installed models
             if !modelStore.models.isEmpty {
-                installedSection
+                VStack(alignment: .leading, spacing: 0) {
+                    Button {
+                        withAnimation(.none) {
+                            installedExpanded.toggle()
+                        }
+                    } label: {
+                        HStack {
+                            Image(systemName: "chevron.right")
+                                .font(.caption.weight(.semibold))
+                                .rotationEffect(.degrees(installedExpanded ? 90 : 0))
+                            Text("Installed")
+                                .font(.subheadline.weight(.semibold))
+                                .foregroundStyle(.secondary)
+                            Spacer()
+                        }
+                        .contentShape(Rectangle())
+                    }
+                    .buttonStyle(.plain)
+                    .padding(.horizontal, 16)
+                    .padding(.vertical, 10)
+
+                    if installedExpanded {
+                        installedContent
+                            .padding(.horizontal, 16)
+                    }
+                }
+
                 Divider()
             }
 
-            // Catalog
+            // Available models
             ScrollView {
-                LazyVStack(spacing: 8, pinnedViews: [.sectionHeaders]) {
-                    Section {
-                        ForEach(visibleModels) { model in
+                LazyVStack(spacing: 8) {
+                    if let info = scanner.info {
+                        HStack(spacing: 6) {
+                            Image(systemName: "memorychip")
+                                .foregroundStyle(.secondary)
+                            Text("\(info.chipName) \u{00b7} \(info.totalRAMGB) GB — recommended up to \(info.recommendedTier.rawValue)")
+                                .font(.subheadline)
+                                .foregroundStyle(.secondary)
+                            Spacer()
+                        }
+                        .padding(.horizontal, 12)
+                        .padding(.vertical, 8)
+                    }
+
+                    if hf.isFetching {
+                        HStack(spacing: 10) {
+                            ProgressView().controlSize(.small)
+                            Text("Searching HuggingFace...")
+                                .font(.subheadline)
+                                .foregroundStyle(.secondary)
+                        }
+                        .padding(.vertical, 24)
+                    } else {
+                        let filteredModels = scanner.info != nil
+                            ? hf.models.filter { $0.minRAMGB <= (scanner.info?.totalRAMGB ?? 999) }
+                            : hf.models
+                        ForEach(filteredModels) { model in
                             ModelRow(model: model)
                                 .environmentObject(downloader)
                                 .environmentObject(modelStore)
                         }
-                    } header: {
-                        Text("Available models")
-                            .font(.caption.weight(.semibold))
-                            .foregroundStyle(.secondary)
-                            .frame(maxWidth: .infinity, alignment: .leading)
-                            .padding(.horizontal, 16)
-                            .padding(.vertical, 6)
-                            .background(.bar)
                     }
                 }
                 .padding(.vertical, 8)
+                .padding(.horizontal, 12)
             }
         }
-        .onAppear { if scanner.info == nil { scanner.scan() } }
+        .onAppear {
+            if scanner.info == nil { scanner.scan() }
+            // Reset search when settings reopen
+            searchText = ""
+            hf.resetToCurated()
+        }
         .fileImporter(isPresented: $showFilePicker,
                       allowedContentTypes: [.init(filenameExtension: "gguf")!]) { result in
             if case .success(let url) = result {
@@ -83,40 +143,27 @@ struct ModelBrowserView: View {
         }
     }
 
-    // MARK: - Installed section
+    // MARK: - Installed
 
-    private var installedSection: some View {
+    private var installedContent: some View {
         VStack(alignment: .leading, spacing: 4) {
-            Text("Installed")
-                .font(.caption.weight(.semibold))
-                .foregroundStyle(.secondary)
-                .padding(.horizontal, 16)
-                .padding(.top, 10)
-
             ForEach(modelStore.models) { model in
-                HStack {
+                HStack(spacing: 10) {
+                    ProviderIconView(modelName: model.name, size: 20)
                     VStack(alignment: .leading, spacing: 2) {
-                        Text(model.name).font(.subheadline.weight(.medium))
-                        Text("\(model.quantization)  ·  \(model.sizeString)")
-                            .font(.caption).foregroundStyle(.secondary)
+                        Text(model.name).font(.body)
+                        Text("\(model.quantization)  \u{00b7}  \(model.sizeString)")
+                            .font(.subheadline).foregroundStyle(.secondary)
                     }
                     Spacer()
-                    if modelStore.activeModelPath == model.path {
-                        Label("Active", systemImage: "checkmark.circle.fill")
-                            .font(.caption.weight(.semibold))
-                            .foregroundStyle(.green)
-                    } else {
-                        Button("Set active") { modelStore.setActive(model) }
-                            .buttonStyle(.bordered)
-                            .controlSize(.small)
-                    }
-                    Button(role: .destructive) { modelStore.remove(model) } label: {
-                        Image(systemName: "trash").foregroundStyle(.red)
+                    Button { modelStore.remove(model) } label: {
+                        Image(systemName: "trash")
+                            .font(.body)
+                            .foregroundStyle(.secondary)
                     }
                     .buttonStyle(.plain)
                 }
-                .padding(.horizontal, 16)
-                .padding(.vertical, 6)
+                .padding(.vertical, 4)
             }
         }
     }
@@ -133,19 +180,14 @@ private struct ModelRow: View {
     private var isInstalled: Bool { downloader.localPath(for: model) != nil }
 
     var body: some View {
-        HStack(alignment: .top, spacing: 12) {
-            // Icon
-            Image(systemName: "brain")
-                .font(.title2)
-                .foregroundStyle(.secondary)
-                .frame(width: 36, height: 36)
-                .background(Color(NSColor.controlBackgroundColor),
-                             in: RoundedRectangle(cornerRadius: 8))
+        HStack(alignment: .center, spacing: 10) {
+            ProviderIconView(modelName: model.name, size: 24)
 
-            // Info
-            VStack(alignment: .leading, spacing: 4) {
+            VStack(alignment: .leading, spacing: 3) {
                 HStack(spacing: 6) {
-                    Text(model.name).font(.subheadline.weight(.semibold))
+                    Text(model.name)
+                        .font(.body)
+                        .lineLimit(1)
                     Text(model.quantization)
                         .font(.caption.weight(.medium))
                         .padding(.horizontal, 6).padding(.vertical, 2)
@@ -153,28 +195,23 @@ private struct ModelRow: View {
                                      in: RoundedRectangle(cornerRadius: 4))
                         .foregroundStyle(Color.accentColor)
                 }
-                Text(model.description)
-                    .font(.caption)
-                    .foregroundStyle(.secondary)
-                    .fixedSize(horizontal: false, vertical: true)
                 HStack(spacing: 12) {
                     Label("\(model.sizeGB, specifier: "%.1f") GB", systemImage: "internaldrive")
-                    Label("\(model.minRAMGB) GB RAM min", systemImage: "memorychip")
+                    Label("\(model.downloads.abbreviated)", systemImage: "arrow.down.circle")
+                    Label("\(model.likes.abbreviated)", systemImage: "heart")
                 }
-                .font(.caption2)
+                .font(.subheadline)
                 .foregroundStyle(.tertiary)
             }
 
             Spacer()
 
-            // Action
             actionButton
         }
-        .padding(.horizontal, 16)
+        .padding(.horizontal, 12)
         .padding(.vertical, 10)
         .background(Color(NSColor.controlBackgroundColor).opacity(0.5),
-                     in: RoundedRectangle(cornerRadius: 12))
-        .padding(.horizontal, 12)
+                     in: RoundedRectangle(cornerRadius: 10))
     }
 
     @ViewBuilder
@@ -182,50 +219,52 @@ private struct ModelRow: View {
         switch state {
         case .idle:
             if isInstalled {
-                Button("Active") {}
-                    .buttonStyle(.bordered)
-                    .disabled(true)
-                    .controlSize(.small)
+                Text("Installed")
+                    .font(.subheadline)
+                    .foregroundStyle(.secondary)
             } else {
-                Button {
-                    downloader.download(model)
-                } label: {
-                    Label("Download", systemImage: "arrow.down.circle")
+                Button { downloader.download(model) } label: {
+                    Image(systemName: "arrow.down.circle")
+                        .font(.title2)
                 }
-                .buttonStyle(.borderedProminent)
-                .controlSize(.small)
+                .buttonStyle(.plain)
+                .foregroundStyle(Color.accentColor)
             }
 
         case .downloading(let p):
-            VStack(alignment: .trailing, spacing: 4) {
+            VStack(spacing: 3) {
                 ProgressView(value: p)
-                    .progressViewStyle(.linear)
-                    .frame(width: 80)
-                HStack(spacing: 6) {
-                    Text("\(Int(p * 100))%")
-                        .font(.caption2)
-                        .monospacedDigit()
-                        .foregroundStyle(.secondary)
-                    Button("Cancel") { downloader.cancel(model) }
-                        .buttonStyle(.borderless)
-                        .font(.caption2)
-                        .foregroundStyle(.red)
-                }
+                    .progressViewStyle(.circular)
+                    .controlSize(.small)
+                Text("\(Int(p * 100))%")
+                    .font(.caption)
+                    .monospacedDigit()
+                    .foregroundStyle(.secondary)
             }
+            .onTapGesture { downloader.cancel(model) }
 
         case .done:
-            Label("Installed", systemImage: "checkmark.circle.fill")
-                .font(.caption.weight(.semibold))
-                .foregroundStyle(.green)
+            Text("Installed")
+                .font(.subheadline)
+                .foregroundStyle(.secondary)
 
         case .failed:
-            VStack(alignment: .trailing, spacing: 4) {
-                Label("Failed", systemImage: "exclamationmark.circle")
-                    .font(.caption).foregroundStyle(.red)
-                Button("Retry") { downloader.download(model) }
-                    .font(.caption2).buttonStyle(.borderless)
+            Button { downloader.download(model) } label: {
+                Image(systemName: "exclamationmark.circle")
+                    .font(.title3)
+                    .foregroundStyle(.red)
             }
+            .buttonStyle(.plain)
         }
     }
 }
 
+// MARK: - Number formatting
+
+private extension Int {
+    var abbreviated: String {
+        if self >= 1_000_000 { return "\(self / 1_000_000)M" }
+        if self >= 1_000 { return "\(self / 1_000)K" }
+        return "\(self)"
+    }
+}

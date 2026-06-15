@@ -19,11 +19,12 @@ DIST_DIR="$SCRIPT_DIR/dist"
 APP_NAME="Embershard"
 APP="$DIST_DIR/$APP_NAME.app"
 VERSION="0.1.0"
+VOL_NAME="$APP_NAME $VERSION"
 NCPU="$(sysctl -n hw.ncpu)"
 
 # ── 1. Build C engine ────────────────────────────────────────────────────────
 
-echo "▸ [1/5] Building C engine (Release)…"
+echo "▸ [1/6] Building C engine (Release)…"
 cmake -B "$BUILD_DIR" \
     -DGGML_METAL=ON \
     -DGGML_METAL_EMBED_LIBRARY=ON \
@@ -38,13 +39,12 @@ echo "  ✓ libembershard_engine.a"
 
 # ── 2. Build Swift app ───────────────────────────────────────────────────────
 
-echo "▸ [2/5] Building Swift app (release)…"
+echo "▸ [2/6] Building Swift app (release)…"
 cd "$SCRIPT_DIR"
 EMBERSHARD_BUILD="$BUILD_DIR" swift build -c release
 BINARY="$SCRIPT_DIR/.build/release/$APP_NAME"
 if [ ! -f "$BINARY" ]; then
     echo "ERROR: expected binary at $BINARY" >&2
-    echo "Files in .build/release/:" >&2
     ls "$SCRIPT_DIR/.build/release/" >&2
     exit 1
 fi
@@ -52,7 +52,7 @@ echo "  ✓ $BINARY ($(du -sh "$BINARY" | cut -f1))"
 
 # ── 3. Assemble .app bundle ──────────────────────────────────────────────────
 
-echo "▸ [3/5] Assembling .app bundle…"
+echo "▸ [3/6] Assembling .app bundle…"
 rm -rf "$DIST_DIR"
 mkdir -p "$APP/Contents/MacOS"
 mkdir -p "$APP/Contents/Frameworks"
@@ -61,55 +61,111 @@ mkdir -p "$APP/Contents/Resources"
 cp "$BINARY" "$APP/Contents/MacOS/$APP_NAME"
 cp "$SCRIPT_DIR/Sources/EmberShardApp/Resources/Info.plist" "$APP/Contents/"
 
+# App icon
+ICNS="$SCRIPT_DIR/Sources/EmberShardApp/Resources/AppIcon.icns"
+if [ -f "$ICNS" ]; then
+    cp "$ICNS" "$APP/Contents/Resources/AppIcon.icns"
+    echo "  ✓ AppIcon.icns"
+fi
+
 # ── 4. Bundle llama.cpp dylibs ───────────────────────────────────────────────
 
-echo "▸ [4/5] Bundling dylibs…"
-# Copy every real (non-symlink) .dylib from the build directory.
+echo "▸ [4/6] Bundling dylibs…"
 find "$BUILD_DIR" -maxdepth 3 -name "lib*.dylib" ! -type l | while IFS= read -r src; do
     libname="$(basename "$src")"
     dest="$APP/Contents/Frameworks/$libname"
     cp "$src" "$dest"
-    # Rewrite install name so it resolves via @rpath at runtime
     install_name_tool -id "@rpath/$libname" "$dest"
     echo "  + $libname"
 done
 
-# Fix any absolute-path dylib references in the main binary
 BIN="$APP/Contents/MacOS/$APP_NAME"
 for dylib in "$APP/Contents/Frameworks/"*.dylib; do
     libname="$(basename "$dylib")"
-    # Replace absolute build-dir reference → @rpath reference
     install_name_tool -change "$BUILD_DIR/$libname" "@rpath/$libname" "$BIN" 2>/dev/null || true
 done
-# Ensure the Frameworks rpath is present (Package.swift adds it, but just in case)
 install_name_tool -add_rpath "@executable_path/../Frameworks" "$BIN" 2>/dev/null || true
 
-# ── 5. Sign and package ──────────────────────────────────────────────────────
+# ── 5. Sign ──────────────────────────────────────────────────────────────────
 
-echo "▸ [5/5] Signing and creating .dmg…"
+echo "▸ [5/6] Signing…"
 codesign --force --deep --sign - "$APP"
 echo "  ✓ Ad-hoc signed"
 
-STAGE="$DIST_DIR/.dmg_stage"
-mkdir -p "$STAGE"
-cp -r "$APP" "$STAGE/"
-ln -sf /Applications "$STAGE/Applications"
+# ── 6. Create DMG with drag-to-Applications window ───────────────────────────
 
-DMG="$DIST_DIR/$APP_NAME-$VERSION-mac.dmg"
+echo "▸ [6/6] Creating DMG…"
+
+DMG_FINAL="$DIST_DIR/$APP_NAME-$VERSION-mac.dmg"
+DMG_WORK="$DIST_DIR/.work.dmg"
+
+# Estimate size: app + a bit of headroom (MB)
+APP_SIZE_KB=$(du -sk "$APP" | awk '{print $1}')
+DMG_SIZE_MB=$(( (APP_SIZE_KB / 1024) + 32 ))
+
+# Create a writable temporary DMG
+rm -f "$DMG_WORK" "$DMG_FINAL"
 hdiutil create \
-    -volname "$APP_NAME $VERSION" \
-    -srcfolder "$STAGE" \
-    -ov -format UDZO \
-    "$DMG"
-rm -rf "$STAGE"
+    -size "${DMG_SIZE_MB}m" \
+    -volname "$VOL_NAME" \
+    -fs HFS+ \
+    -type UDIF \
+    -o "$DMG_WORK"
 
-SIZE="$(du -sh "$DMG" | cut -f1)"
+# Mount it (no auto-open)
+MOUNT_POINT="$(hdiutil attach -noverify -noautoopen "$DMG_WORK" \
+    | grep "Apple_HFS" | sed 's/.*Apple_HFS[[:space:]]*//')"
+echo "  Mounted at: $MOUNT_POINT"
+
+# Populate
+cp -r "$APP" "$MOUNT_POINT/"
+ln -s /Applications "$MOUNT_POINT/Applications"
+
+# Wait for Finder to register the newly mounted volume
+sleep 2
+
+# Configure window layout via AppleScript (best-effort)
+osascript -e "
+    tell application \"Finder\"
+        tell disk \"$VOL_NAME\"
+            open
+            set current view of container window to icon view
+            set toolbar visible of container window to false
+            set statusbar visible of container window to false
+            set the bounds of container window to {200, 120, 760, 440}
+            set theViewOptions to the icon view options of container window
+            set arrangement of theViewOptions to not arranged
+            set icon size of theViewOptions to 128
+            update without registering applications
+            delay 1
+            close
+        end tell
+    end tell
+" 2>/dev/null || echo "  ⚠  Finder layout skipped (DMG will still work)"
+
+# Give Finder time to flush .DS_Store
+sync
+sleep 2
+
+# Unmount
+hdiutil detach "$MOUNT_POINT" -quiet
+
+# Convert writable DMG → compressed read-only
+hdiutil convert "$DMG_WORK" \
+    -format UDZO \
+    -imagekey zlib-level=9 \
+    -o "$DMG_FINAL" 2>/dev/null
+
+rm -f "$DMG_WORK"
+
+SIZE="$(du -sh "$DMG_FINAL" | cut -f1)"
 echo ""
 echo "────────────────────────────────────────────────"
-echo "  ✓  $DMG  ($SIZE)"
+echo "  ✓  $DMG_FINAL  ($SIZE)"
 echo "────────────────────────────────────────────────"
 echo ""
 echo "  Test locally:       open \"$APP\""
+echo "  Test DMG:           open \"$DMG_FINAL\""
 echo ""
 echo "  First launch on other Macs (Gatekeeper bypass):"
 echo "    right-click → Open → Open"

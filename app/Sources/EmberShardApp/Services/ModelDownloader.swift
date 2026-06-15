@@ -59,7 +59,13 @@ final class ModelDownloader: NSObject, ObservableObject {
 
     func localPath(for model: HFModelEntry) -> String? {
         let url = Self.modelsDirectory.appendingPathComponent(model.filename)
-        return FileManager.default.fileExists(atPath: url.path) ? url.path : nil
+        if FileManager.default.fileExists(atPath: url.path) { return url.path }
+        // Also check if any installed model contains this filename
+        let installed = LocalModelStore.shared.models
+        if let match = installed.first(where: { $0.path.contains(model.filename) || $0.name.lowercased().contains(model.name.lowercased()) }) {
+            return match.path
+        }
+        return nil
     }
 }
 
@@ -70,10 +76,23 @@ extension ModelDownloader: URLSessionDownloadDelegate {
                                 downloadTask: URLSessionDownloadTask,
                                 didFinishDownloadingTo location: URL) {
         guard let modelId = downloadTask.taskDescription else { return }
-        let dest = Self.modelsDirectory.appendingPathComponent(
-            downloadTask.response?.suggestedFilename
+
+        // Validate: reject files smaller than 1MB (likely HTML redirect/error pages)
+        let dlAttrs = try? FileManager.default.attributesOfItem(atPath: location.path)
+        let dlSize = (dlAttrs?[.size] as? Int64) ?? 0
+        if dlSize < 1_000_000 {
+            Task { @MainActor in
+                self.states[modelId] = .failed("Download failed (file too small - possible redirect)")
+                self.tasks.removeValue(forKey: modelId)
+            }
+            return
+        }
+
+        // Use original request filename (not suggestedFilename which can be wrong after redirects)
+        let filename = downloadTask.originalRequest?.url?.lastPathComponent
+            ?? downloadTask.response?.suggestedFilename
             ?? location.lastPathComponent
-        )
+        let dest = Self.modelsDirectory.appendingPathComponent(filename)
         do {
             if FileManager.default.fileExists(atPath: dest.path) {
                 try FileManager.default.removeItem(at: dest)

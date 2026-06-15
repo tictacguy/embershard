@@ -8,8 +8,16 @@ struct EngineConfig {
     var contextSize: Int32 = 4096
     var temperature: Float = 0.7
     var topP: Float = 0.95
-    var gpuLayers: Int32 = -1   // -1 = all on Metal
-    var threads: Int32 = 0      // 0 = auto
+    var gpuLayers: Int32 = -1
+    var threads: Int32 = 0
+    var kvQuant: ESKVQuantType = ES_KV_QUANT_F16
+}
+
+// MARK: - Events
+
+enum AgentEvent: Sendable {
+    case stage(ESAgentStage)
+    case token(String)
 }
 
 // MARK: - Engine errors
@@ -18,13 +26,15 @@ enum EngineError: LocalizedError {
     case modelLoadFailed
     case contextInitFailed
     case generationFailed
+    case contextFull
     case notLoaded
 
     var errorDescription: String? {
         switch self {
         case .modelLoadFailed:   return "Failed to load model"
         case .contextInitFailed: return "Failed to initialize context"
-        case .generationFailed:  return "Generation failed"
+        case .generationFailed:  return "Generation failed — context may be full. Start a new chat."
+        case .contextFull:       return "Context full — start a new chat to continue."
         case .notLoaded:         return "Engine not loaded"
         }
     }
@@ -32,8 +42,7 @@ enum EngineError: LocalizedError {
 
 // MARK: - EngineService
 
-/// Thread-safe actor that owns the C engine instance.
-/// All engine calls are serialized through this actor.
+/// Serializes all C engine calls through a dedicated global actor.
 @globalActor actor EngineActor {
     static let shared = EngineActor()
 }
@@ -44,13 +53,12 @@ final class EngineService: ObservableObject {
 
     private var engine: ESEngineRef?
 
-    // Published state (projected to MainActor for UI updates)
     private(set) var isLoaded = false
     private(set) var isGenerating = false
     private(set) var loadProgress: Double = 0
     private(set) var currentModelPath: String = ""
 
-    private init() {}
+    nonisolated private init() {}
 
     // MARK: - Lifecycle
 
@@ -62,14 +70,14 @@ final class EngineService: ObservableObject {
         }
 
         var cConfig = ESConfig()
-        cConfig.model_path   = nil // set below
+        cConfig.model_path   = nil
         cConfig.n_ctx        = config.contextSize
         cConfig.n_gpu_layers = config.gpuLayers
         cConfig.n_threads    = config.threads
         cConfig.temperature  = config.temperature
         cConfig.top_p        = config.topP
+        cConfig.kv_quant     = config.kvQuant
 
-        // Bridge progress callback via a box
         let box = ProgressBox(callback: onProgress)
         let boxPtr = Unmanaged.passRetained(box).toOpaque()
         cConfig.progress_ud = boxPtr
@@ -87,7 +95,6 @@ final class EngineService: ObservableObject {
             return es_create(&cfg, &ref)
         }
 
-        // Release the box
         Unmanaged<ProgressBox>.fromOpaque(boxPtr).release()
 
         guard status == ES_STATUS_OK, let ref else {
@@ -109,9 +116,7 @@ final class EngineService: ObservableObject {
 
     // MARK: - Generation
 
-    /// Starts a new conversation and generates a response.
-    /// Returns an AsyncStream of token pieces.
-    func generate(systemPrompt: String?, userText: String, maxTokens: Int32 = 512) -> AsyncThrowingStream<String, Error> {
+    func generate(systemPrompt: String?, userText: String, maxTokens: Int32 = 2048) -> AsyncThrowingStream<String, Error> {
         AsyncThrowingStream { continuation in
             Task { @EngineActor in
                 guard let eng = self.engine else {
@@ -135,23 +140,21 @@ final class EngineService: ObservableObject {
                     let b = Unmanaged<ContinuationBox>.fromOpaque(ud).takeRetainedValue()
                     if status == ES_STATUS_CANCELLED {
                         b.continuation.finish(throwing: CancellationError())
+                    } else if status == ES_STATUS_ERR_GEN {
+                        b.continuation.finish(throwing: EngineError.generationFailed)
                     } else {
                         b.continuation.finish()
                     }
                 }
 
-                if systemPrompt != nil || true {
-                    let sysCStr = systemPrompt.map { ($0 as NSString).utf8String }
-                    let userCStr = (userText as NSString).utf8String!
-                    _ = es_generate(eng, sysCStr ?? nil, userCStr, maxTokens,
-                                    onToken, onDone, boxPtr)
-                }
+                let sysCStr = systemPrompt.map { ($0 as NSString).utf8String }
+                let userCStr = (userText as NSString).utf8String!
+                _ = es_generate(eng, sysCStr ?? nil, userCStr, maxTokens, onToken, onDone, boxPtr)
             }
         }
     }
 
-    /// Continues an existing conversation.
-    func continueConversation(userText: String, maxTokens: Int32 = 512) -> AsyncThrowingStream<String, Error> {
+    func continueConversation(userText: String, maxTokens: Int32 = 2048) -> AsyncThrowingStream<String, Error> {
         AsyncThrowingStream { continuation in
             Task { @EngineActor in
                 guard let eng = self.engine else {
@@ -170,9 +173,16 @@ final class EngineService: ObservableObject {
                     b.continuation.yield(String(cString: piece))
                 }
 
-                let onDone: @convention(c) (ESStatus, UnsafeMutableRawPointer?) -> Void = { _, ud in
+                let onDone: @convention(c) (ESStatus, UnsafeMutableRawPointer?) -> Void = { status, ud in
                     guard let ud else { return }
-                    Unmanaged<ContinuationBox>.fromOpaque(ud).takeRetainedValue().continuation.finish()
+                    let b = Unmanaged<ContinuationBox>.fromOpaque(ud).takeRetainedValue()
+                    if status == ES_STATUS_CANCELLED {
+                        b.continuation.finish(throwing: CancellationError())
+                    } else if status == ES_STATUS_ERR_GEN {
+                        b.continuation.finish(throwing: EngineError.generationFailed)
+                    } else {
+                        b.continuation.finish()
+                    }
                 }
 
                 let userCStr = (userText as NSString).utf8String!
@@ -180,6 +190,53 @@ final class EngineService: ObservableObject {
             }
         }
     }
+
+    // MARK: - Agentic Pipeline
+
+    func orchestrate(userText: String, maxTokensPerStage: Int32 = 1024) -> AsyncThrowingStream<AgentEvent, Error> {
+        AsyncThrowingStream { continuation in
+            Task { @EngineActor in
+                guard let eng = self.engine else {
+                    continuation.finish(throwing: EngineError.notLoaded)
+                    return
+                }
+                self.isGenerating = true
+                defer { self.isGenerating = false }
+
+                let box = AgentEventBox(continuation: continuation)
+                let boxPtr = Unmanaged.passRetained(box).toOpaque()
+
+                let onStage: @convention(c) (ESAgentStage, UnsafeMutableRawPointer?) -> Void = { stage, ud in
+                    guard let ud else { return }
+                    let b = Unmanaged<AgentEventBox>.fromOpaque(ud).takeUnretainedValue()
+                    b.continuation.yield(.stage(stage))
+                }
+
+                let onToken: @convention(c) (UnsafePointer<CChar>?, UnsafeMutableRawPointer?) -> Void = { piece, ud in
+                    guard let piece, let ud else { return }
+                    let b = Unmanaged<AgentEventBox>.fromOpaque(ud).takeUnretainedValue()
+                    b.continuation.yield(.token(String(cString: piece)))
+                }
+
+                let onDone: @convention(c) (ESStatus, UnsafeMutableRawPointer?) -> Void = { status, ud in
+                    guard let ud else { return }
+                    let b = Unmanaged<AgentEventBox>.fromOpaque(ud).takeRetainedValue()
+                    if status == ES_STATUS_CANCELLED {
+                        b.continuation.finish(throwing: CancellationError())
+                    } else if status != ES_STATUS_OK {
+                        b.continuation.finish(throwing: EngineError.generationFailed)
+                    } else {
+                        b.continuation.finish()
+                    }
+                }
+
+                let queryCStr = (userText as NSString).utf8String!
+                _ = es_orchestrate(eng, queryCStr, maxTokensPerStage, onStage, onToken, onDone, boxPtr)
+            }
+        }
+    }
+
+    // MARK: - Control
 
     func cancel() {
         guard let e = engine else { return }
@@ -193,6 +250,11 @@ final class EngineService: ObservableObject {
 
     var contextUsed: Int32 { engine.map { es_ctx_used($0) } ?? 0 }
     var contextMax:  Int32 { engine.map { es_ctx_max($0)  } ?? 0 }
+    var lastNTokens: Int32 { engine.map { es_last_n_tokens($0) } ?? 0 }
+
+    func needsReload(for path: String) -> Bool {
+        !isLoaded || currentModelPath != path
+    }
 }
 
 // MARK: - Private helpers
@@ -205,6 +267,13 @@ private final class ProgressBox: @unchecked Sendable {
 private final class ContinuationBox: @unchecked Sendable {
     let continuation: AsyncThrowingStream<String, Error>.Continuation
     init(continuation: AsyncThrowingStream<String, Error>.Continuation) {
+        self.continuation = continuation
+    }
+}
+
+private final class AgentEventBox: @unchecked Sendable {
+    let continuation: AsyncThrowingStream<AgentEvent, Error>.Continuation
+    init(continuation: AsyncThrowingStream<AgentEvent, Error>.Continuation) {
         self.continuation = continuation
     }
 }

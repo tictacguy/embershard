@@ -24,10 +24,12 @@ typedef enum {
 typedef struct {
     int32_t n_gpu_layers;    // layers offloaded to Metal (-1 = all)
     int32_t n_ctx;           // maximum context size
+    int32_t n_seq_max;       // max concurrent KV sequences (0 = use default 16)
     int32_t n_batch;         // batch size for prompt processing
     int32_t n_threads;       // CPU threads (used for CPU fallback and prompt processing)
     bool    use_mmap;        // memory-mapped model loading
     bool    flash_attn;      // enable flash attention if available
+    int32_t kv_quant;        // 0=F16, 1=Q8_0, 2=Q4_0
     const char *model_path;  // path to the GGUF file
     // Called during model loading with progress in [0.0, 1.0]. Return false to abort.
     bool (*on_load_progress)(float progress, void *user_data);
@@ -42,6 +44,7 @@ typedef struct {
     int32_t               n_ctx_max;
     int32_t               pos;
     bool                  ready;
+    int32_t               last_n_tokens; // tokens generated in last call
     // Atomic cancel flag — set from any thread, checked in the generation loop.
     atomic_bool           cancel;
 } es_engine_t;
