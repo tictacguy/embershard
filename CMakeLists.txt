@@ -26,6 +26,8 @@ set(ES_ENGINE_SOURCES
     src/es_orchestrator.c
     src/es_memory.c
     src/es_api.c
+    src/es_gx.c
+    src/es_tok.c
 )
 
 add_library(embershard_engine STATIC ${ES_ENGINE_SOURCES})
@@ -76,3 +78,41 @@ if(APPLE)
 endif()
 
 target_compile_options(test_engine PRIVATE -Wall -Wextra -O2)
+
+# --- Native ggml engine correctness gate ---
+add_executable(test_gx
+    src/test_gx.c
+    ${ES_ENGINE_SOURCES}
+)
+
+target_include_directories(test_gx PRIVATE
+    include
+    vendor/llama.cpp/include
+    vendor/llama.cpp/ggml/include
+)
+
+target_link_libraries(test_gx PRIVATE llama ggml)
+
+if(APPLE)
+    target_link_libraries(test_gx PRIVATE "-framework Foundation" "-framework Metal" "-framework MetalKit")
+endif()
+
+target_compile_options(test_gx PRIVATE -Wall -Wextra -O2)
+
+# --- Tokenizer validation gate ---
+add_executable(tok_test src/tok_test.c ${ES_ENGINE_SOURCES})
+target_include_directories(tok_test PRIVATE include vendor/llama.cpp/include vendor/llama.cpp/ggml/include)
+target_link_libraries(tok_test PRIVATE llama ggml)
+if(APPLE)
+    target_link_libraries(tok_test PRIVATE "-framework Foundation" "-framework Metal" "-framework MetalKit")
+endif()
+target_compile_options(tok_test PRIVATE -Wall -Wextra -O2)
+
+# --- Standalone native generation (links ggml only, NO libllama) ---
+add_executable(gen_gx src/gen_gx.c src/es_gx.c src/es_tok.c)
+target_include_directories(gen_gx PRIVATE include vendor/llama.cpp/ggml/include)
+target_link_libraries(gen_gx PRIVATE ggml)
+if(APPLE)
+    target_link_libraries(gen_gx PRIVATE "-framework Foundation" "-framework Metal" "-framework MetalKit")
+endif()
+target_compile_options(gen_gx PRIVATE -Wall -Wextra -O2)

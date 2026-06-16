@@ -15,6 +15,7 @@ struct ChatView: View {
     @State private var isLoadingModel = false
     @State private var showScrollDown = false
     @AppStorage("es_agent_mode") private var agentMode = false
+    @State private var nativeNeedsReplay = false   // force full KV replay next turn
 
     private var chat: Chat? { chatStore.chat(id: chatId) }
 
@@ -29,9 +30,39 @@ struct ChatView: View {
         "Waking up the silicon...",
     ]
 
+    private var logoImage: NSImage? {
+        guard let url = Bundle.module.url(forResource: "logo", withExtension: "svg"),
+              let img = NSImage(contentsOf: url) else { return nil }
+        img.isTemplate = true
+        return img
+    }
+
+    private var emptyTitle: some View {
+        HStack(spacing: 10) {
+            if let img = logoImage {
+                Image(nsImage: img).resizable().renderingMode(.template)
+                    .aspectRatio(contentMode: .fit)
+                    .frame(width: 26, height: 26)
+                    .foregroundStyle(.secondary)
+            } else {
+                Image(systemName: "sparkles")
+                    .font(.system(size: 22, weight: .light))
+                    .foregroundStyle(.secondary)
+            }
+            Text("Embershard")
+                .font(.title2.weight(.regular))
+                .foregroundStyle(.secondary)
+        }
+    }
+
     var body: some View {
         VStack(spacing: 0) {
             if messages.isEmpty {
+                Spacer()
+                VStack(spacing: 16) {
+                    emptyTitle
+                    chatInputView.frame(maxWidth: 620)
+                }
                 Spacer()
             } else {
                 ScrollViewReader { proxy in
@@ -82,45 +113,42 @@ struct ChatView: View {
                         }
                     }
                 }
-            }
-
-            ChatInputView(
-                text: $inputText,
-                isGenerating: appState.isGenerating,
-                models: modelStore.models,
-                activeModelPath: modelStore.activeModelPath,
-                agentMode: agentMode,
-                skills: skillsStore.skills,
-                activeSkillId: chat?.skillId,
-                onModelChange: { model in modelStore.setActive(model) },
-                onAgentToggle: { agentMode.toggle() },
-                onSkillChange: { skillId in
-                    guard var c = chat else { return }
-                    c.skillId = skillId
-                    chatStore.updateChat(c)
-                },
-                onSend: sendOrOrchestrate,
-                onCancel: cancelGeneration
-            )
-
-            if messages.isEmpty {
-                Spacer()
+                chatInputView   // full width once the conversation has started
             }
         }
         .background(Color(NSColor.windowBackgroundColor))
     }
 
+    private var chatInputView: some View {
+        ChatInputView(
+            text: $inputText,
+            isGenerating: appState.isGenerating,
+            models: modelStore.compatibleModels,
+            activeModelPath: modelStore.activeModelPath,
+            agentMode: agentMode,
+            skills: skillsStore.skills,
+            activeSkillId: chat?.skillId,
+            onModelChange: { model in modelStore.setActive(model) },
+            onAgentToggle: { agentMode.toggle() },
+            onSkillChange: { skillId in
+                guard var c = chat else { return }
+                c.skillId = skillId
+                chatStore.updateChat(c)
+            },
+            onSend: sendOrOrchestrate,
+            onCancel: cancelGeneration
+        )
+    }
+
     // MARK: - Routing
 
     private func sendOrOrchestrate() {
-        // Agent mode is an explicit, opt-in toggle: when the user turns it on we
-        // run the planner→executor→critic pipeline for any real question. The only
-        // bypass is for trivial greetings/small-talk, so "ciao" stays a direct
-        // reply instead of spinning up the whole pipeline.
+        // Direct chat always runs on our native engine (es_gx). Agent mode runs
+        // the planner→executor pipeline; trivial greetings stay a direct reply.
         if agentMode && !isTrivialGreeting(inputText) {
             orchestrateMessage()
         } else {
-            sendMessage()
+            sendMessageNative()
         }
     }
 
@@ -215,12 +243,106 @@ struct ChatView: View {
 
             await MainActor.run {
                 finishGeneration(msgId: msgId, tokenCount: tokenCount)
-                // Generate title after first response
+                // Set title and icon for new chats
                 if chat?.title == "New chat" {
-                    generateTitle(for: chatId, from: text)
+                    setHeuristicTitle(from: text)
                 }
             }
         }
+    }
+
+    // MARK: - Native engine (es_gx: own forward pass + KV cache + tokenizer)
+
+    private func sendMessageNative() {
+        let text = inputText.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !text.isEmpty, !appState.isGenerating else { return }
+        guard !modelStore.activeModelPath.isEmpty else { return }
+
+        inputText = ""
+        // Completed prior turns become the replay history (used only on chat switch).
+        let history = nativeHistory()
+        chatStore.addMessage(Message(role: "user", content: text), toChatId: chatId)
+        let force = nativeNeedsReplay; nativeNeedsReplay = false
+        runNativeTurn(userText: text, history: history, forceFull: force)
+    }
+
+    // Prior completed user/assistant turns of this chat, in order.
+    private func nativeHistory() -> [NativeTurn] {
+        messages.filter { ($0.role == "user" || $0.role == "assistant") && !$0.content.isEmpty }
+                .map { NativeTurn(role: $0.role, content: $0.content) }
+    }
+
+    private func runNativeTurn(userText: String, history: [NativeTurn], forceFull: Bool = false) {
+        var assistantMsg = Message(role: "assistant", content: "", modelName: activeModelName)
+        assistantMsg.isStreaming = true
+        chatStore.addMessage(assistantMsg, toChatId: chatId)
+        streamingMsgId = assistantMsg.id
+        appState.isGenerating = true
+        let msgId = assistantMsg.id
+
+        let path    = modelStore.activeModelPath
+        let system  = resolvedSystemPrompt()
+        let ctxSize = Int32(UserDefaults.standard.integer(forKey: "es_ctx_size").nonZeroOr(8192))
+        let maxTok  = Int32(UserDefaults.standard.integer(forKey: "es_max_tokens").nonZeroOr(2048))
+        let kvQuant = Int32(UserDefaults.standard.integer(forKey: "es_kv_quant"))   // 0=F16 1=Q8_0 2=Q4_0
+        let samp    = nativeSampling()
+        let cid     = chatId
+
+        generationTask = Task {
+            var tokenCount = 0
+            do {
+                // One model resident at a time: drop the agent (llama.cpp) engine.
+                await EngineService.shared.unload()
+                let ok = await NativeEngine.shared.ensureLoaded(path: path, nCtx: ctxSize, kvQuant: kvQuant)
+                guard ok else { throw EngineError.modelLoadFailed }
+                let stream = await NativeEngine.shared.send(chat: cid, system: system,
+                                                            history: history, user: userText,
+                                                            maxTokens: maxTok, sampling: samp,
+                                                            forceFull: forceFull)
+                for try await piece in stream {
+                    guard !Task.isCancelled else { break }
+                    tokenCount += 1
+                    await MainActor.run { chatStore.appendToMessage(id: msgId, inChatId: chatId, piece: piece) }
+                }
+            } catch is CancellationError {
+                // partial turn -> stale KV; cancelGeneration sets nativeNeedsReplay
+            } catch {
+                await MainActor.run {
+                    chatStore.appendToMessage(id: msgId, inChatId: chatId,
+                                              piece: "\n_Error: \(error.localizedDescription)_")
+                }
+            }
+            await MainActor.run {
+                finishGeneration(msgId: msgId, tokenCount: tokenCount)
+                if chat?.title == "New chat" { setHeuristicTitle(from: userText) }
+            }
+        }
+    }
+
+    // Build the native sampler config from the user's Inference settings.
+    private func nativeSampling() -> es_gx_sampling {
+        let d = UserDefaults.standard
+        func f(_ k: String, _ def: Double) -> Float { Float(d.object(forKey: k) as? Double ?? def) }
+        func i(_ k: String, _ def: Int) -> Int32 { Int32(d.object(forKey: k) as? Int ?? def) }
+        return es_gx_sampling(
+            temp:           f("es_temperature", 0.7),
+            top_p:          f("es_top_p", 0.95),
+            top_k:          i("es_top_k", 40),
+            min_p:          f("es_min_p", 0.05),
+            repeat_penalty: f("es_repeat_penalty", 1.1),
+            repeat_last_n:  i("es_repeat_last_n", 64),
+            seed:           UInt32(truncatingIfNeeded: d.object(forKey: "es_seed") as? Int ?? 0)
+        )
+    }
+
+    // Title without an LLM call (the native KV is live and must not be clobbered).
+    private func setHeuristicTitle(from userMessage: String) {
+        let words = userMessage.split(whereSeparator: { $0 == " " || $0 == "\n" })
+        let title = words.prefix(6).joined(separator: " ")
+        guard !title.isEmpty else { return }
+        let icon = IconCatalog.keywordIcon(for: userMessage) ?? IconCatalog.fallback
+        chatStore.setChatTitle(id: chatId, title: String(title.prefix(60)))
+        chatStore.setChatIcon(id: chatId, icon: icon)
     }
 
     // MARK: - Agent (Planner -> Executor -> Critic)
@@ -252,17 +374,18 @@ struct ChatView: View {
             // as the final response.
             var currentStage: ESAgentStage = ES_STAGE_PLANNING
             var answerTokens = 0
+            let ctxSize = Int32(UserDefaults.standard.integer(forKey: "es_ctx_size").nonZeroOr(8192))
+            let kvQuant = Int32(UserDefaults.standard.integer(forKey: "es_kv_quant"))
+            let maxTok  = Int32(UserDefaults.standard.integer(forKey: "es_max_tokens").nonZeroOr(2048))
+            let samp    = nativeSampling()
+            _ = systemPrompt   // skill prompt not applied to the agent pipeline yet
             do {
-                let engine = EngineService.shared
-
-                if await engine.needsReload(for: modelStore.activeModelPath) {
-                    let config = buildEngineConfig()
-                    try await engine.load(config: config) { _ in }
-                }
-
-                let maxTok = Int32(UserDefaults.standard.integer(forKey: "es_max_tokens").nonZeroOr(2048))
-                let stream = await engine.orchestrate(systemPrompt: systemPrompt,
-                                                      userText: text, maxTokensPerStage: maxTok)
+                // Agent pipeline runs on our native engine too (no llama.cpp).
+                await EngineService.shared.unload()
+                let ok = await NativeEngine.shared.ensureLoaded(path: modelStore.activeModelPath,
+                                                                nCtx: ctxSize, kvQuant: kvQuant)
+                guard ok else { throw EngineError.modelLoadFailed }
+                let stream = await NativeEngine.shared.orchestrate(user: text, maxTokens: maxTok, sampling: samp)
 
                 for try await event in stream {
                     guard !Task.isCancelled else { break }
@@ -304,7 +427,7 @@ struct ChatView: View {
             await MainActor.run {
                 finishGeneration(msgId: msgId, tokenCount: answerTokens)
                 if chat?.title == "New chat" {
-                    generateTitle(for: chatId, from: text)
+                    setHeuristicTitle(from: text)
                 }
             }
         }
@@ -408,6 +531,8 @@ struct ChatView: View {
     private func cancelGeneration() {
         generationTask?.cancel()
         Task { @EngineActor in EngineService.shared.cancel() }
+        NativeEngine.shared.requestCancel()   // stop the C decode loop now
+        nativeNeedsReplay = true   // partial KV -> replay next turn
         if let msgId = streamingMsgId {
             chatStore.finishMessage(id: msgId, inChatId: chatId)
         }
@@ -421,9 +546,12 @@ struct ChatView: View {
         chatStore.removeMessage(id: msg.id, fromChatId: chatId)
         let sorted = messages.sorted { $0.timestamp < $1.timestamp }
         guard let lastUser = sorted.last(where: { $0.role == "user" && $0.timestamp < msg.timestamp }) else { return }
-        Task { @EngineActor in EngineService.shared.reset() }
-        inputText = lastUser.content
-        sendMessage()
+        // KV no longer matches the message list — force a full replay, then
+        // regenerate for the existing last user turn (no new user message).
+        let history = sorted.filter { $0.timestamp < lastUser.timestamp
+                                      && ($0.role == "user" || $0.role == "assistant") && !$0.content.isEmpty }
+                            .map { NativeTurn(role: $0.role, content: $0.content) }
+        runNativeTurn(userText: lastUser.content, history: history, forceFull: true)
     }
 
     private func assistantModelName(for msg: Message) -> String {

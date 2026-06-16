@@ -33,10 +33,20 @@ struct EmberShardApp: App {
 
 final class AppDelegate: NSObject, NSApplicationDelegate {
     func applicationWillTerminate(_ notification: Notification) {
-        Task { @EngineActor in
-            EngineService.shared.unload()
-        }
-        Thread.sleep(forTimeInterval: 0.1)
+        // Free ALL Metal resources before the ggml-metal static destructor runs at
+        // process exit — otherwise its residency-set teardown asserts (SIGABRT).
+        // The native engine (es_gx) is the active one and holds the model + KV
+        // buffers, so it must be freed too. Cancel first so any in-flight decode
+        // returns immediately, then wait (briefly) for each unload to complete.
+        NativeEngine.shared.requestCancel()
+
+        let g1 = DispatchSemaphore(value: 0)
+        Task { @NativeEngineActor in NativeEngine.shared.unload(); g1.signal() }
+        _ = g1.wait(timeout: .now() + 3)
+
+        let g2 = DispatchSemaphore(value: 0)
+        Task { @EngineActor in EngineService.shared.unload(); g2.signal() }
+        _ = g2.wait(timeout: .now() + 3)
     }
 
     func applicationShouldTerminateAfterLastWindowClosed(_ sender: NSApplication) -> Bool {

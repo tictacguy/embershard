@@ -104,13 +104,33 @@ struct ModelBrowserView: View {
                         }
                         .padding(.vertical, 24)
                     } else {
-                        let filteredModels = scanner.info != nil
-                            ? hf.models.filter { $0.minRAMGB <= (scanner.info?.totalRAMGB ?? 999) }
-                            : hf.models
-                        ForEach(filteredModels) { model in
-                            ModelRow(model: model)
-                                .environmentObject(downloader)
-                                .environmentObject(modelStore)
+                        // Only models compatible with our native engine (llama / qwen2).
+                        let filteredModels = hf.models
+                            .filter { $0.compatible }
+                            .filter { $0.minRAMGB <= (scanner.info?.totalRAMGB ?? 999) }
+                        if filteredModels.isEmpty {
+                            VStack(spacing: 8) {
+                                Image(systemName: "magnifyingglass")
+                                    .font(.system(size: 28, weight: .light))
+                                    .foregroundStyle(.tertiary)
+                                Text(searchText.isEmpty
+                                     ? "No compatible models for this machine."
+                                     : "No compatible results for “\(searchText)”.")
+                                    .font(.subheadline)
+                                    .foregroundStyle(.secondary)
+                                Text("We only list llama / qwen2 GGUFs that fit your RAM. Try another name (e.g. “qwen”, “llama”).")
+                                    .font(.caption)
+                                    .foregroundStyle(.tertiary)
+                                    .multilineTextAlignment(.center)
+                            }
+                            .frame(maxWidth: .infinity)
+                            .padding(.vertical, 36)
+                        } else {
+                            ForEach(filteredModels) { model in
+                                ModelRow(model: model)
+                                    .environmentObject(downloader)
+                                    .environmentObject(modelStore)
+                            }
                         }
                     }
                 }
@@ -148,12 +168,28 @@ struct ModelBrowserView: View {
     private var installedContent: some View {
         VStack(alignment: .leading, spacing: 4) {
             ForEach(modelStore.models) { model in
+                let archOK = modelStore.isCompatible(model.path)
+                let complete = modelStore.shardsComplete(model.path)
+                let usable = archOK && complete
                 HStack(spacing: 10) {
                     ProviderIconView(modelName: model.name, size: 20)
                     VStack(alignment: .leading, spacing: 2) {
                         Text(model.name).font(.body)
-                        Text("\(model.quantization)  \u{00b7}  \(model.sizeString)")
-                            .font(.subheadline).foregroundStyle(.secondary)
+                        HStack(spacing: 6) {
+                            Text("\(model.quantization)  \u{00b7}  \(model.sizeString)")
+                                .font(.subheadline).foregroundStyle(.secondary)
+                            Text(modelStore.arch(for: model.path))
+                                .font(.caption2.weight(.medium))
+                                .padding(.horizontal, 5).padding(.vertical, 1)
+                                .background((usable ? Color.green : Color.orange).opacity(0.15),
+                                             in: Capsule())
+                                .foregroundStyle(usable ? Color.green : Color.orange)
+                            if !archOK {
+                                Text("not supported").font(.caption2).foregroundStyle(.orange)
+                            } else if !complete {
+                                Text("incomplete shards").font(.caption2).foregroundStyle(.orange)
+                            }
+                        }
                     }
                     Spacer()
                     Button { modelStore.remove(model) } label: {
@@ -164,6 +200,7 @@ struct ModelBrowserView: View {
                     .buttonStyle(.plain)
                 }
                 .padding(.vertical, 4)
+                .opacity(usable ? 1 : 0.6)
             }
         }
     }
@@ -194,6 +231,18 @@ private struct ModelRow: View {
                         .background(Color.accentColor.opacity(0.1),
                                      in: RoundedRectangle(cornerRadius: 4))
                         .foregroundStyle(Color.accentColor)
+                }
+                // Publisher (HF org) + official badge
+                HStack(spacing: 4) {
+                    Image(systemName: model.isOfficial ? "checkmark.seal.fill" : "person.crop.circle")
+                        .font(.caption2)
+                        .foregroundStyle(model.isOfficial ? Color.blue : Color.secondary)
+                    Text(model.publisher)
+                        .font(.caption)
+                        .foregroundStyle(.secondary)
+                    Text(model.isOfficial ? "· official" : "· community")
+                        .font(.caption2)
+                        .foregroundStyle(.tertiary)
                 }
                 HStack(spacing: 12) {
                     Label("\(model.sizeGB, specifier: "%.1f") GB", systemImage: "internaldrive")
