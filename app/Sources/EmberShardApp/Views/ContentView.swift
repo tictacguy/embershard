@@ -29,18 +29,34 @@ struct ContentView: View {
         .navigationSplitViewStyle(.balanced)
         .frame(minWidth: 800, minHeight: 560)
         .onChange(of: appState.newChatRequested) { _, requested in
-            if requested { createNewChat(); appState.newChatRequested = false }
+            if requested { showNewChatPicker = true; appState.newChatRequested = false }
         }
         .onChange(of: appState.selectedChatId) { _, newId in
             if let id = newId, !appState.openTabs.contains(id) {
                 appState.openTabs.append(id)
             }
         }
+        .sheet(isPresented: $showNewChatPicker) {
+            NewChatSheet(models: modelStore.compatibleModels,
+                         activeModel: modelStore.activeModelPath) { kind, compareModels in
+                createNewChat(kind: kind, compareModels: compareModels)
+                showNewChatPicker = false
+            } onCancel: { showNewChatPicker = false }
+        }
     }
 
-    private func createNewChat() {
-        let chat = Chat(modelPath: modelStore.activeModelPath,
-                        projectId: appState.selectedProjectId)
+    @State private var showNewChatPicker = false
+
+    private func createNewChat(kind: ChatKind = .standard, compareModels: [String] = []) {
+        var chat = Chat(modelPath: modelStore.activeModelPath,
+                        projectId: appState.selectedProjectId,
+                        kind: kind, compareModels: compareModels)
+        // Give agent/arena chats their recognizable icon up front (sidebar + tabs).
+        switch kind {
+        case .agent:   chat.icon = "wand.and.stars"
+        case .compare: chat.icon = "rectangle.split.3x1.fill"
+        case .standard: break
+        }
         chatStore.addChat(chat)
         appState.openTab(chatId: chat.id)
     }
@@ -89,6 +105,7 @@ private struct ChromeTab: View {
     let onClose: () -> Void
     let onCloseOthers: () -> Void
 
+    @EnvironmentObject var appState: AppState
     @State private var isHovered = false
     @State private var closeHovered = false
 
@@ -96,7 +113,7 @@ private struct ChromeTab: View {
         HStack(spacing: 6) {
             Image(systemName: icon)
                 .font(.system(size: 10))
-                .foregroundStyle(isSelected ? Color.accentColor : Color.secondary)
+                .foregroundStyle(isSelected ? appState.accentColor : Color.secondary)
 
             Text(title)
                 .font(.subheadline)
@@ -232,5 +249,105 @@ private struct WelcomeAction: View {
         }
         .buttonStyle(.plain)
         .onHover { isHovered = $0 }
+    }
+}
+
+// MARK: - New Chat type picker
+
+struct NewChatSheet: View {
+    let models: [LocalModel]
+    let activeModel: String
+    let onCreate: (ChatKind, [String]) -> Void
+    let onCancel: () -> Void
+
+    @EnvironmentObject var appState: AppState
+    @State private var kind: ChatKind = .standard
+    @State private var selected: [String] = []
+
+    var body: some View {
+        VStack(alignment: .leading, spacing: 18) {
+            Text("New chat").font(.title2.weight(.semibold))
+
+            HStack(spacing: 12) {
+                typeCard(.standard, "Standard", "bubble.left.fill",
+                         "Chat with one model.")
+                typeCard(.agent, "Agentic", "wand.and.stars",
+                         "For complex tasks: plans, then executes.")
+                typeCard(.compare, "Arena", "rectangle.split.3x1.fill",
+                         "Ask up to 4 models at once.")
+            }
+
+            if kind == .compare {
+                VStack(alignment: .leading, spacing: 6) {
+                    Text("Pick up to 4 models (\(selected.count)/4)")
+                        .font(.subheadline).foregroundStyle(.secondary)
+                    ScrollView {
+                        VStack(spacing: 2) {
+                            ForEach(models) { m in modelRow(m) }
+                        }
+                    }
+                    .frame(maxHeight: 200)
+                    .background(Color.primary.opacity(0.03), in: RoundedRectangle(cornerRadius: 8))
+                }
+            }
+
+            HStack {
+                Spacer()
+                Button("Cancel", action: onCancel).keyboardShortcut(.cancelAction)
+                Button("Create") { onCreate(kind, kind == .compare ? selected : []) }
+                    .keyboardShortcut(.defaultAction)
+                    .buttonStyle(.borderedProminent)
+                    .disabled(createDisabled)
+            }
+        }
+        .padding(20)
+        .frame(width: 540)
+        .onAppear { if selected.isEmpty, !activeModel.isEmpty { selected = [activeModel] } }
+    }
+
+    private var createDisabled: Bool {
+        if models.isEmpty { return true }
+        if kind == .compare { return selected.count < 2 }
+        return false
+    }
+
+    private func typeCard(_ k: ChatKind, _ title: String, _ icon: String, _ desc: String) -> some View {
+        let on = kind == k
+        return Button { kind = k } label: {
+            VStack(spacing: 8) {
+                Image(systemName: icon).font(.system(size: 22))
+                    .foregroundStyle(on ? appState.accentColor : .secondary)
+                Text(title).font(.subheadline.weight(.medium))
+                Text(desc).font(.caption2).foregroundStyle(.tertiary)
+                    .multilineTextAlignment(.center).fixedSize(horizontal: false, vertical: true)
+            }
+            .frame(maxWidth: .infinity, minHeight: 96)
+            .padding(.vertical, 10)
+            .background(on ? appState.accentColor.opacity(0.1) : Color.primary.opacity(0.03),
+                        in: RoundedRectangle(cornerRadius: 10))
+            .overlay(RoundedRectangle(cornerRadius: 10)
+                .stroke(on ? appState.accentColor.opacity(0.5) : Color.primary.opacity(0.08), lineWidth: 1))
+        }
+        .buttonStyle(.plain)
+    }
+
+    private func modelRow(_ m: LocalModel) -> some View {
+        let on = selected.contains(m.path)
+        return Button {
+            if on { selected.removeAll { $0 == m.path } }
+            else if selected.count < 4 { selected.append(m.path) }
+        } label: {
+            HStack(spacing: 8) {
+                Image(systemName: on ? "checkmark.circle.fill" : "circle")
+                    .foregroundStyle(on ? appState.accentColor : Color.secondary)
+                Text(m.name).font(.subheadline).lineLimit(1)
+                Spacer()
+                Text(m.sizeString).font(.caption2).foregroundStyle(.tertiary)
+            }
+            .padding(.horizontal, 10).padding(.vertical, 6)
+            .contentShape(Rectangle())
+        }
+        .buttonStyle(.plain)
+        .disabled(!on && selected.count >= 4)
     }
 }

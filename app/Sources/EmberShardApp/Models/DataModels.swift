@@ -50,6 +50,8 @@ struct Message: Codable, Identifiable {
 
 // MARK: - Chat
 
+enum ChatKind: String, Codable { case standard, agent, compare }
+
 struct Chat: Codable, Identifiable {
     var id: UUID = UUID()
     var title: String = "New chat"
@@ -59,11 +61,36 @@ struct Chat: Codable, Identifiable {
     var projectId: UUID? = nil
     var skillId: UUID? = nil      // optional Skill applied to this chat
     var messages: [Message] = []
+    var kind: ChatKind = .standard          // standard | agent | compare
+    var compareModels: [String] = []        // model paths for a compare chat
+    var compareTurns: [CompareTurn] = []    // persisted Q&A turns for an arena chat
 
-    init(modelPath: String = "", projectId: UUID? = nil, skillId: UUID? = nil) {
+    enum CodingKeys: String, CodingKey {
+        case id, title, icon, createdAt, modelPath, projectId, skillId, messages, kind, compareModels, compareTurns
+    }
+
+    init(modelPath: String = "", projectId: UUID? = nil, skillId: UUID? = nil,
+         kind: ChatKind = .standard, compareModels: [String] = []) {
         self.modelPath = modelPath
         self.projectId = projectId
         self.skillId   = skillId
+        self.kind      = kind
+        self.compareModels = compareModels
+    }
+
+    init(from d: Decoder) throws {
+        let c = try d.container(keyedBy: CodingKeys.self)
+        id            = try c.decode(UUID.self, forKey: .id)
+        title         = (try? c.decode(String.self, forKey: .title)) ?? "New chat"
+        icon          = (try? c.decode(String.self, forKey: .icon)) ?? "bubble.left"
+        createdAt     = (try? c.decode(Date.self, forKey: .createdAt)) ?? Date()
+        modelPath     = (try? c.decode(String.self, forKey: .modelPath)) ?? ""
+        projectId     = try? c.decode(UUID.self, forKey: .projectId)
+        skillId       = try? c.decode(UUID.self, forKey: .skillId)
+        messages      = (try? c.decode([Message].self, forKey: .messages)) ?? []
+        kind          = (try? c.decode(ChatKind.self, forKey: .kind)) ?? .standard
+        compareModels = (try? c.decode([String].self, forKey: .compareModels)) ?? []
+        compareTurns  = (try? c.decode([CompareTurn].self, forKey: .compareTurns)) ?? []
     }
 
     mutating func autoTitle() {
@@ -440,6 +467,12 @@ final class ChatStore: ObservableObject {
     func setChatIcon(id: UUID, icon: String) {
         guard let idx = chats.firstIndex(where: { $0.id == id }) else { return }
         chats[idx].icon = icon
+        save()
+    }
+
+    func setCompareTurns(id: UUID, turns: [CompareTurn]) {
+        guard let idx = chats.firstIndex(where: { $0.id == id }) else { return }
+        chats[idx].compareTurns = turns
         save()
     }
 

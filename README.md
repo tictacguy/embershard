@@ -4,86 +4,96 @@
 
 ### [⬇️ Download the latest .dmg](https://github.com/tictacguy/embershard/releases/latest)
 
-No need to clone or build — grab the signed `.dmg` from the latest release, drag
-Embershard to Applications, then right-click → Open on first launch (ad-hoc
-signed). Apple Silicon, macOS 14+.
+**Latest release:** v0.1.1
 
-Embershard is a native LLM inference engine and chat app for macOS / Apple
-Silicon. Its chat path does **not** use llama.cpp at inference time: it reads the
-GGUF itself, uploads the weights to Metal, builds its own transformer compute
-graph on `ggml`, owns a resident KV cache, and tokenizes with its own byte-level
-BPE / SentencePiece. `ggml` provides only the tensor kernels.
+Grab the signed `.dmg` from the latest release, drag Embershard into
+Applications, and right-click → Open the first time (you'll need to approve it's opening by going to System Settings->Privacy and Security->Scroll down until "Security" section and click "Open Anyway"). No clone, no toolchain. Apple Silicon, macOS 14 or newer.
 
-The project is intentionally narrow: it targets the `llama` and `qwen2`
-architectures (Llama 3.x, Mistral, Qwen 2.5, and other models that report those
-architectures in their GGUF), validated for numerical parity against llama.cpp.
-It is not a general GGUF runner.
+Embershard is a macOS chat app with its own LLM inference engine underneath. The
+interesting part is what *isn't* there: at inference time the chat path never
+calls into llama.cpp. Embershard opens the GGUF on its own, pushes the weights to
+Metal, assembles its transformer compute graph directly on `ggml`, keeps the KV
+cache resident across turns, and runs its own byte-level BPE / SentencePiece
+tokenizer. `ggml` is used purely as a bag of tensor kernels.
 
-The development of this product has been orchestrated by me and coded by
-ClaudeCode. The app icon is by DinosoftLabs.
+That independence is deliberate, and so is the narrow scope: Embershard runs the
+`llama` and `qwen2` families (Llama 3.x, Mistral, Qwen 2.5, and anything that
+reports those architectures in its GGUF) and nothing else. It is a focused engine
+checked for numerical parity against the reference — not a drop-in GGUF runner.
 
-## Acknowledgements to llama.cpp and GGML
+> Embershard grew out of [ds4](https://github.com/antirez/ds4), which set the
+> template for a small, honest, self-contained native project. ds4 was the
+> inspiration; the engine, app, and writing here are their own thing.
 
-The native engine (`es_gx`) does not call libllama, but it exists thanks to the
-path opened by `llama.cpp` and `ggml`: their kernels, the GGUF format and tooling,
-the quantization formats, and a large amount of hard-won engineering knowledge
-were the reference while building the forward pass, the KV-cache layout, the
-sampler, and the tokenizer. We link `ggml` for the tensor ops and the Metal
-backend, and we keep llama.cpp available for the experimental multi-agent
-orchestrator. Thanks to Georgi Gerganov and the contributors.
+Orchestrated by me, written with ClaudeCode. App icon by DinosoftLabs.
 
-## Status
+## Why bother re-implementing the forward pass
 
-Beta. What works and is validated:
+Wrapping libllama is the easy path, and it is the one most apps take. Embershard
+takes the harder one so the whole hot loop — graph construction, the KV-cache
+layout, the sampler, tokenization — lives in code we own and can reason about.
+`llama.cpp` and `ggml` still made it possible: their kernels, the GGUF format and
+its tooling, the quant formats, and a great deal of hard-won engineering were the
+map we followed while building everything above the tensor ops. We link `ggml`
+for those ops and the Metal backend, and keep llama.cpp around only for the
+experimental multi-agent orchestrator. Thanks to Georgi Gerganov and the
+contributors.
 
-- Forward pass for `llama` and `qwen2` matches llama.cpp logits (cosine 0.999999,
-  greedy continuations are token-identical).
-- Resident KV cache (F16 / Q8_0 / Q4_0) with incremental O(n) decode and
-  multi-turn reuse. A sliding window drops the oldest tokens when the context
-  fills, preserving absolute RoPE positions (no re-rope), so long chats continue.
-- Decode throughput is at parity with llama.cpp on the same model (both are
-  memory-bandwidth bound and use the same ggml kernels).
-- The whole app runs on the native engine: direct chat and the multi-agent
-  pipeline (planner → executor) both run on `es_gx`, not llama.cpp.
-- Native tokenizer with two backends, token-IDs identical to llama.cpp on the
-  test corpus: byte-level BPE (`gpt2`: `llama-bpe`, `qwen2`) and SentencePiece
+## What's proven
+
+Beta, but the core is measured rather than asserted:
+
+- **Logit parity.** The `llama` and `qwen2` forward pass matches llama.cpp to a
+  cosine of 0.999999; greedy continuations come out token-for-token identical.
+- **Resident KV cache** in F16 / Q8_0 / Q4_0, incremental O(n) decode, reused
+  across turns. When the context fills, a sliding window evicts the oldest tokens
+  while keeping absolute RoPE positions intact (no re-roping), so long
+  conversations keep going.
+- **Throughput at parity** with llama.cpp on the same model — both are
+  memory-bandwidth bound on identical ggml kernels, so there is nothing to win or
+  lose here.
+- **One engine for everything.** Plain chat and the planner → executor agent
+  pipeline both run on `es_gx`; llama.cpp is not in the inference path.
+- **Tokenizer parity.** Token IDs match llama.cpp across the test corpus, with
+  two backends: byte-level BPE (`gpt2`: `llama-bpe`, `qwen2`) and SentencePiece
   (`llama`/SPM: Llama 2, Mistral v0.1/v0.2, TinyLlama).
-- Sharded GGUFs (`-00001-of-N`) load by following the split metadata.
+- **Sharded GGUFs** (`-00001-of-N`) load by following the split metadata.
 
-Not done / known limitations:
+## Limits
 
-- Only `llama` / `qwen2` architectures. Gemma, Phi, MoE (gpt-oss, Mixtral), etc.
-  are not supported and are filtered out of the model browser.
-- Models larger than the GPU working set are not streamed from SSD; loading one
-  fails cleanly (the app filters models by RAM). True SSD streaming is future work.
-- Custom Metal kernels are not written yet: attention uses `ggml_flash_attn_ext`
-  for prefill and a manual `ggml` path for decode.
-- Tokenizers beyond BPE/SPM (tiktoken-style for gpt-oss, etc.) are not added,
-  and would only matter once their architectures are supported.
+- Architectures stop at `llama` / `qwen2`. Gemma, Phi, and MoE models (gpt-oss,
+  Mixtral, …) are unsupported and filtered out of the browser.
+- A model that exceeds the GPU working set is not streamed from SSD — loading it
+  fails cleanly, and the browser filters by available RAM up front. SSD streaming
+  is future work.
+- No bespoke Metal kernels yet: prefill uses `ggml_flash_attn_ext`, decode a
+  manual `ggml` path.
+- Tokenizers past BPE/SPM (tiktoken-style for gpt-oss, etc.) aren't written, and
+  won't matter until the matching architectures land.
 
-## Architecture
+## How it works
 
 ```
-es_gx.c    GGUF load (single or sharded) -> Metal weights, forward graph,
-           resident KV cache (F16/Q8_0/Q4_0) + sliding window, sampling
-es_tok.c   native tokenizer: byte-level BPE (gpt2) and SentencePiece (llama)
+es_gx.c             GGUF load (single or sharded) -> Metal weights, forward
+                    graph, resident KV cache (F16/Q8_0/Q4_0) + sliding window,
+                    host-side sampling
+es_tok.c            tokenizer: byte-level BPE (gpt2) and SentencePiece (llama)
 NativeEngine.swift  multi-turn chat + planner→executor pipeline on es_gx
 
-(llama.cpp / es_engine.c / es_orchestrator.c remain for the CLI and tests.)
+(llama.cpp / es_engine.c / es_orchestrator.c stay for the CLI and tests.)
 ```
 
-The native forward pass per layer: RMSNorm, Q/K/V projection (+ bias for qwen2),
-RoPE (NORMAL for llama, NEOX for qwen2), attention (flash for prefill, manual
-mul_mat/softmax for decode) over the resident K/V cache, output projection,
-residual, gated FFN (SwiGLU), residual; final norm and output projection produce
-the logits for the last position. Sampling (temperature, top-k, top-p, min-p,
-repeat penalty, seed) runs on the host.
+Per layer the forward pass is the familiar stack: RMSNorm, Q/K/V projection (with
+bias on qwen2), RoPE (NORMAL for llama, NEOX for qwen2), attention over the
+resident K/V cache (flash for prefill, manual mul_mat/softmax for decode), output
+projection and residual, a SwiGLU-gated FFN and residual. A final norm and output
+projection give the logits for the last position; temperature, top-k, top-p,
+min-p, repeat penalty and seed are applied on the host.
 
-## Build
+## Building from source
 
-Prerequisites: macOS 14+ on Apple Silicon, CMake 3.20+, Xcode command-line
-tools, and `llama.cpp` checked out under `vendor/` (for `ggml` and the Metal
-backend).
+You need macOS 14+ on Apple Silicon, CMake 3.20+, the Xcode command-line tools,
+and a `llama.cpp` checkout under `vendor/` (for `ggml` and the Metal backend).
 
 ```sh
 git clone --depth 1 https://github.com/ggerganov/llama.cpp.git vendor/llama.cpp
@@ -95,40 +105,41 @@ cmake --build build -j$(sysctl -n hw.ncpu)
 Targets:
 
 ```
-embershard        llama.cpp CLI (single-shot + REPL, agent mode)
-test_gx           native-engine correctness gate vs llama.cpp (logits + greedy)
-tok_test          tokenizer parity gate vs llama.cpp
-gen_gx            standalone multi-turn generation, links ggml only (no libllama)
-test_engine       agent/orchestrator integration test
+embershard   llama.cpp CLI (single-shot + REPL, agent mode)
+test_gx      native-engine parity gate vs llama.cpp (logits + greedy)
+tok_test     tokenizer parity gate vs llama.cpp
+gen_gx       standalone multi-turn generation, links ggml only (no libllama)
+test_engine  agent/orchestrator integration test
 ```
 
-## Validation
+## Checking parity
 
-The native engine is gated against llama.cpp on the same GGUF:
+The engine is gated against llama.cpp on the same GGUF — this is how the numbers
+above are produced, not a claim taken on faith:
 
 ```sh
-# Loads the model once with llama.cpp (reference) and once with es_gx, feeds
-# identical token IDs, compares last-token logits, then greedy-generates with
-# both and checks the token sequences match.
+# Load once with llama.cpp (reference) and once with es_gx, feed identical token
+# IDs, compare last-token logits, then greedy-generate with both and diff the
+# token sequences.
 ./build/test_gx /path/to/model.gguf "The capital of France is" 32
 
-# Tokenizer: compares es_tok vs llama_tokenize on a corpus.
+# Tokenizer: es_tok vs llama_tokenize over a corpus.
 ./build/tok_test /path/to/model.gguf
 ```
 
-Expected: argmax matches, cosine > 0.999, greedy token sequences identical,
-tokenizer 12/12 cases identical.
+Pass criteria: argmax agrees, cosine > 0.999, greedy sequences identical,
+tokenizer 12/12 cases byte-for-byte.
 
-Standalone generation without libllama:
+Generation with no libllama in the link at all:
 
 ```sh
 ./build/gen_gx /path/to/model.gguf "My name is Alice." "What is my name?"
 ```
 
-## macOS app
+## The app
 
-A SwiftUI app that links the engine as a static library and bundles the `ggml`
-dylibs. Chat runs entirely on `es_gx`.
+A SwiftUI front end that links the engine as a static library and bundles the
+`ggml` dylibs; every token is produced by `es_gx`.
 
 ```sh
 cd app
@@ -136,18 +147,19 @@ swift build -c release      # development build
 ./make_dmg.sh               # signed .app + drag-to-Applications .dmg
 ```
 
-Features: tabbed chats and projects, per-chat skills, an experimental multi-agent
-mode, a HuggingFace model browser limited to engine-compatible official GGUFs
-(with publisher shown), and an Inference panel exposing context size, max tokens,
-and the full sampler (temperature, top-k, top-p, min-p, repeat penalty, seed).
+Inside: tabbed chats and projects, per-chat skills, three chat modes when you
+start a new one — **Standard**, **Agentic** (planner → executor, for multi-step
+tasks), and **Arena** (ask up to four models at once and watch them answer side
+by side, concurrently) — a HuggingFace browser restricted to engine-compatible
+official GGUFs with the publisher shown, and an inference panel for context size,
+max tokens and the full sampler.
 
 First launch on another Mac (ad-hoc signed): right-click → Open → Open, or
 `xattr -dr com.apple.quarantine /path/to/Embershard.app`.
 
-## Models
+## Picking models
 
-The app browser lists official, engine-compatible GGUFs filtered by the
-machine's RAM (Qwen 2.5 family; SmolLM2 from HuggingFaceTB). Search shows
-community repacks too, marked as such. You can also import a local `.gguf`; if it
-is not a `llama`/`qwen2` model it is marked unsupported and hidden from the chat
-model picker.
+The browser lists official, engine-compatible GGUFs filtered by your machine's
+RAM (the Qwen 2.5 family; SmolLM2 from HuggingFaceTB). Search also surfaces
+community repacks, flagged as such. Import a local `.gguf` and, if it isn't a
+`llama`/`qwen2` model, it's marked unsupported and kept out of the chat picker.
