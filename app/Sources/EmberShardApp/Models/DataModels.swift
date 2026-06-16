@@ -1,4 +1,5 @@
 import Foundation
+import EmberShardBridge
 
 // MARK: - Message
 
@@ -560,28 +561,77 @@ final class LocalModelStore: ObservableObject {
 
     @Published private(set) var models: [LocalModel] = []
     @Published private(set) var activeModelPath: String = ""
+    @Published private(set) var archByPath: [String: String] = [:]   // path -> arch (runtime)
 
     private init() {
         if let data    = UserDefaults.standard.data(forKey: modelsKey),
            let decoded = try? JSONDecoder().decode([LocalModel].self, from: data) {
             models = decoded
         }
+        refreshArchs()
         activeModelPath = UserDefaults.standard.string(forKey: activeKey) ?? ""
 
-        if activeModelPath.isEmpty, let first = models.first {
-            activeModelPath = first.path
+        // Active model must exist AND be compatible with the native engine.
+        let activeOK = !activeModelPath.isEmpty
+            && FileManager.default.fileExists(atPath: activeModelPath)
+            && isCompatible(activeModelPath)
+        if !activeOK {
+            activeModelPath = compatibleModels.first(where: { FileManager.default.fileExists(atPath: $0.path) })?.path ?? ""
             persistActive()
         }
+    }
 
-        if !activeModelPath.isEmpty && !FileManager.default.fileExists(atPath: activeModelPath) {
-            activeModelPath = models.first(where: { FileManager.default.fileExists(atPath: $0.path) })?.path ?? ""
-            persistActive()
+    // MARK: Native-engine compatibility (es_gx supports llama / qwen2)
+
+    func arch(for path: String) -> String { archByPath[path] ?? "?" }
+    func isCompatible(_ path: String) -> Bool {
+        let a = archByPath[path]; return a == "llama" || a == "qwen2"
+    }
+
+    // For a `-NNNNN-of-MMMMM.gguf` shard, check all M shards are present on disk.
+    func shardsComplete(_ path: String) -> Bool {
+        guard let r = path.range(of: #"-(\d{5})-of-(\d{5})\.gguf$"#, options: .regularExpression)
+        else { return true }   // not a shard
+        let match = String(path[r])               // e.g. -00001-of-00003.gguf
+        let comps = match.dropFirst().dropLast(5).split(separator: "-")  // ["00001","of","00003"]
+        guard comps.count == 3, let total = Int(comps[2]) else { return true }
+        let prefix = String(path[path.startIndex..<r.lowerBound])
+        for i in 1...total {
+            let p = String(format: "%@-%05d-of-%05d.gguf", prefix, i, total)
+            if !FileManager.default.fileExists(atPath: p) { return false }
+        }
+        return true
+    }
+
+    // Usable by the native engine: compatible arch AND (if sharded) complete.
+    func isUsable(_ path: String) -> Bool { isCompatible(path) && shardsComplete(path) }
+
+    var compatibleModels: [LocalModel] { models.filter { isUsable($0.path) } }
+
+    private func probeArch(_ path: String) -> String {
+        let a = path.withCString { es_gx_probe_arch($0) }
+        switch a {
+        case ES_GX_ARCH_LLAMA:  return "llama"
+        case ES_GX_ARCH_QWEN2:  return "qwen2"
+        case ES_GX_ARCH_GEMMA:  return "gemma"
+        case ES_GX_ARCH_GEMMA2: return "gemma2"
+        default:                return "unknown"
+        }
+    }
+    private func refreshArchs() {
+        for m in models where archByPath[m.path] == nil {
+            if FileManager.default.fileExists(atPath: m.path) {
+                archByPath[m.path] = probeArch(m.path)
+            }
         }
     }
 
     func add(_ model: LocalModel) {
         guard !models.contains(where: { $0.path == model.path }) else { return }
         models.append(model)
+        if FileManager.default.fileExists(atPath: model.path) {
+            archByPath[model.path] = probeArch(model.path)
+        }
         persist()
     }
 

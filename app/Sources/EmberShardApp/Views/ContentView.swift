@@ -5,8 +5,10 @@ struct ContentView: View {
     @EnvironmentObject var modelStore: LocalModelStore
     @EnvironmentObject var appState:   AppState
 
+    @State private var columnVisibility: NavigationSplitViewVisibility = .all
+
     var body: some View {
-        NavigationSplitView(columnVisibility: .constant(.all)) {
+        NavigationSplitView(columnVisibility: $columnVisibility) {
             SidebarView()
                 .navigationSplitViewColumnWidth(min: 200, ideal: 250, max: 300)
         } detail: {

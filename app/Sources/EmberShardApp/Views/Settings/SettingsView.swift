@@ -104,6 +104,11 @@ private struct DisplaySettingsView: View {
 private struct InferenceSettingsView: View {
     @AppStorage("es_temperature") private var temperature: Double = 0.7
     @AppStorage("es_top_p") private var topP: Double = 0.95
+    @AppStorage("es_top_k") private var topK: Int = 40
+    @AppStorage("es_min_p") private var minP: Double = 0.05
+    @AppStorage("es_repeat_penalty") private var repeatPenalty: Double = 1.1
+    @AppStorage("es_repeat_last_n") private var repeatLastN: Int = 64
+    @AppStorage("es_seed") private var seed: Int = 0
     @AppStorage("es_ctx_size") private var contextSize: Int = 8192
     @AppStorage("es_max_tokens") private var maxTokens: Int = 2048
     @AppStorage("es_gpu_layers") private var gpuLayers: Int = -1
@@ -113,29 +118,44 @@ private struct InferenceSettingsView: View {
     @AppStorage("es_flash_attn") private var flashAttn: Bool = true
     @AppStorage("es_use_mmap") private var useMmap: Bool = true
 
+    private func slider(_ title: String, _ icon: String, _ value: Binding<Double>,
+                        _ range: ClosedRange<Double>, _ step: Double, _ fmt: String) -> some View {
+        HStack {
+            Label(title, systemImage: icon)
+            Spacer()
+            Slider(value: value, in: range, step: step).frame(width: 150)
+            Text(String(format: fmt, value.wrappedValue))
+                .monospacedDigit().foregroundStyle(.secondary)
+                .frame(width: 40, alignment: .trailing)
+        }
+    }
+
     var body: some View {
         Form {
             Section("Sampling") {
+                slider("Temperature", "thermometer.medium", $temperature, 0...2, 0.05, "%.2f")
+                slider("Top-P", "chart.bar", $topP, 0...1, 0.05, "%.2f")
                 HStack {
-                    Label("Temperature", systemImage: "thermometer.medium")
+                    Label("Top-K", systemImage: "list.number")
                     Spacer()
-                    Slider(value: $temperature, in: 0...2, step: 0.05)
-                        .frame(width: 160)
-                    Text(String(format: "%.2f", temperature))
-                        .monospacedDigit()
-                        .foregroundStyle(.secondary)
-                        .frame(width: 36, alignment: .trailing)
+                    TextField("", value: $topK, format: .number).frame(width: 60)
+                        .multilineTextAlignment(.trailing)
+                    Text("0 = off").font(.caption).foregroundStyle(.tertiary)
                 }
-
+                slider("Min-P", "chart.bar.xaxis", $minP, 0...0.5, 0.01, "%.2f")
+                slider("Repeat penalty", "repeat", $repeatPenalty, 1...2, 0.05, "%.2f")
                 HStack {
-                    Label("Top-P", systemImage: "chart.bar")
+                    Label("Repeat last-N", systemImage: "arrow.uturn.backward")
                     Spacer()
-                    Slider(value: $topP, in: 0...1, step: 0.05)
-                        .frame(width: 160)
-                    Text(String(format: "%.2f", topP))
-                        .monospacedDigit()
-                        .foregroundStyle(.secondary)
-                        .frame(width: 36, alignment: .trailing)
+                    TextField("", value: $repeatLastN, format: .number).frame(width: 60)
+                        .multilineTextAlignment(.trailing)
+                }
+                HStack {
+                    Label("Seed", systemImage: "dice")
+                    Spacer()
+                    TextField("", value: $seed, format: .number).frame(width: 90)
+                        .multilineTextAlignment(.trailing)
+                    Text("0 = fixed").font(.caption).foregroundStyle(.tertiary)
                 }
             }
 
@@ -219,6 +239,17 @@ private struct InferenceSettingsView: View {
                 Toggle(isOn: $useMmap) {
                     Label("Memory-mapped loading (mmap)", systemImage: "doc.on.doc")
                 }
+            }
+
+            Section("Engine") {
+                HStack {
+                    Label("Inference engine", systemImage: "cpu.fill")
+                    Spacer()
+                    Text("Embershard native (es_gx)").foregroundStyle(.secondary)
+                }
+                Text("Chat runs entirely on our own ggml forward pass, resident KV cache, and native tokenizer — no llama.cpp at inference time.")
+                    .font(.caption)
+                    .foregroundStyle(.tertiary)
             }
 
             Section {

@@ -157,7 +157,7 @@ struct ChatInputView: View {
 
             Text("AI can make mistakes. Verify important information.")
                 .font(.caption2)
-                .foregroundStyle(.quaternary)
+                .foregroundStyle(.tertiary)
                 .padding(.top, 4)
         }
         .padding(.horizontal, 16)
