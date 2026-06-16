@@ -277,10 +277,12 @@ static int run_repl(es_engine_t *engine, int32_t max_tokens,
             es_bench_start(&bench);
 
             // stream_cb prints critic output token by token
-            int32_t n = es_orchestrator_run(orch, input_buf, max_tokens,
+            repl_cb_state_t cb_state = {&bench, true};
+            int32_t n = es_orchestrator_run(orch, NULL, input_buf, max_tokens,
+                                             /*run_critic=*/true,
                                              resp_buf, sizeof(resp_buf),
-                                             repl_token_cb,
-                                             &(repl_cb_state_t){&bench, true});
+                                             repl_token_cb, &cb_state,
+                                             NULL, NULL);
             printf("\n");
 
             if (n < 0) {

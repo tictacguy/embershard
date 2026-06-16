@@ -110,7 +110,7 @@ private struct InferenceSettingsView: View {
     @AppStorage("es_threads") private var threads: Int = 0
     @AppStorage("es_batch_size") private var batchSize: Int = 512
     @AppStorage("es_kv_quant") private var kvQuant: Int = 0
-    @AppStorage("es_flash_attn") private var flashAttn: Bool = false
+    @AppStorage("es_flash_attn") private var flashAttn: Bool = true
     @AppStorage("es_use_mmap") private var useMmap: Bool = true
 
     var body: some View {

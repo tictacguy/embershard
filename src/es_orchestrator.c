@@ -10,9 +10,11 @@ static const char PLANNER_SYS[] =
     "Be concise. List only the steps, no explanations.";
 
 static const char EXECUTOR_SYS[] =
-    "You are an execution agent. You will receive a plan and the original "
-    "user query. Execute the plan and produce a thorough answer. "
-    "Follow the numbered steps and show your work.";
+    "You are an execution agent. You receive a plan and the original user query. "
+    "Carry out the plan and write the complete, well-structured final answer "
+    "addressed directly to the user. Use clear Markdown (headings, lists, code "
+    "blocks) where helpful. Do not mention the plan or that you are an agent — "
+    "just deliver the answer.";
 
 static const char CRITIC_SYS[] =
     "You are a synthesis agent. You will receive the original query, a plan, "
@@ -58,17 +60,19 @@ void es_orchestrator_free(es_orchestrator_t *orch) {
     free(orch);
 }
 
-// Streaming callback state for critic stage
+// Streaming accumulator: forwards each piece to the user callback (so every
+// stage streams live to the UI) while also buffering the full text so it can be
+// fed into the next stage's prompt.
 typedef struct {
     char    *buf;
     int32_t  len;
     int32_t  cap;
     es_orch_stream_cb user_cb;
     void    *user_data;
-} critic_stream_state_t;
+} stream_accum_t;
 
-static void critic_token_cb(const char *piece, void *ud) {
-    critic_stream_state_t *s = (critic_stream_state_t *)ud;
+static void accum_token_cb(const char *piece, void *ud) {
+    stream_accum_t *s = (stream_accum_t *)ud;
     int32_t piece_len = (int32_t)strlen(piece);
 
     // Grow buffer if needed
@@ -83,93 +87,141 @@ static void critic_token_cb(const char *piece, void *ud) {
     if (s->user_cb) s->user_cb(piece, s->user_data);
 }
 
-int32_t es_orchestrator_run(es_orchestrator_t *orch, const char *user_query,
-                             int32_t max_tokens_per_stage,
+// Prepend an optional system prompt (e.g. an active skill) as a context header
+// to an agent input. Caller owns the returned buffer.
+static char *with_system(const char *system_prompt, const char *body) {
+    if (!system_prompt || !system_prompt[0]) return strdup(body);
+    size_t n = strlen(system_prompt) + strlen(body) + 64;
+    char *out = malloc(n);
+    if (!out) return NULL;
+    snprintf(out, n, "Follow these instructions:\n%s\n\n%s", system_prompt, body);
+    return out;
+}
+
+int32_t es_orchestrator_run(es_orchestrator_t *orch,
+                             const char *system_prompt, const char *user_query,
+                             int32_t max_tokens_per_stage, bool run_critic,
                              char *out_buf, int32_t out_len,
-                             es_orch_stream_cb stream_cb, void *stream_ud) {
+                             es_orch_stream_cb stream_cb, void *stream_ud,
+                             es_orch_stage_cb  stage_cb,  void *stage_ud) {
     if (!orch || !user_query || !out_buf || out_len <= 0) return -1;
 
-    char *plan    = malloc((size_t)ES_ORCH_BUF_SIZE);
-    char *draft   = malloc((size_t)ES_ORCH_BUF_SIZE);
-    if (!plan || !draft) {
-        free(plan); free(draft);
-        return -1;
-    }
-
     // ── Stage 1: Planner ──────────────────────────────────────────────────
+    // Every stage streams live to the UI through stream_cb; the accumulator also
+    // captures the full text to build the next stage's prompt.
+    if (stage_cb) stage_cb(ES_ORCH_STAGE_PLANNING, stage_ud);
     if (orch->verbose) fprintf(stderr, "[orch] stage=planner ...\n");
 
-    int32_t plan_len = es_agent_run(orch->planner, user_query,
-                                    plan, ES_ORCH_BUF_SIZE, max_tokens_per_stage);
-    if (plan_len < 0) {
+    char *plan_input = with_system(system_prompt, user_query);
+    if (!plan_input) return -1;
+
+    stream_accum_t plan_acc = {
+        .buf = malloc((size_t)ES_ORCH_BUF_SIZE), .len = 0, .cap = ES_ORCH_BUF_SIZE,
+        .user_cb = stream_cb, .user_data = stream_ud,
+    };
+    if (!plan_acc.buf) { free(plan_input); return -1; }
+    plan_acc.buf[0] = '\0';
+
+    int32_t plan_gen = es_agent_run_stream(orch->planner, plan_input,
+                                           max_tokens_per_stage, accum_token_cb, &plan_acc);
+    free(plan_input);
+    if (plan_gen < 0) {
         fprintf(stderr, "[orch] planner failed\n");
-        free(plan); free(draft);
+        free(plan_acc.buf);
         return -1;
     }
-    if (orch->verbose) fprintf(stderr, "[orch] plan (%d chars):\n%s\n", plan_len, plan);
-    // Free planner KV — its output is already in `plan` string buffer
+    char *plan = plan_acc.buf;
+    if (orch->verbose) fprintf(stderr, "[orch] plan (%d chars):\n%s\n", plan_acc.len, plan);
+    // Free planner KV — its output is already captured in `plan`
     es_engine_kv_seq_rm(orch->engine, orch->planner->seq_id, 0, -1);
     orch->planner->pos = 0;
 
     // ── Stage 2: Executor ─────────────────────────────────────────────────
-    // Build executor input: plan + original query
-    char *exec_input = malloc((size_t)(ES_ORCH_BUF_SIZE + strlen(user_query) + 128));
-    if (!exec_input) { free(plan); free(draft); return -1; }
-    snprintf(exec_input, ES_ORCH_BUF_SIZE + strlen(user_query) + 128,
-             "Original query: %s\n\nPlan:\n%s\n\nNow execute the plan step by step.",
-             user_query, plan);
+    // When there is no critic stage, the executor writes the final user-facing
+    // answer directly; otherwise it produces a draft for the critic to refine.
+    char *exec_body = malloc((size_t)(plan_acc.len + strlen(user_query) + 192));
+    if (!exec_body) { free(plan); return -1; }
+    sprintf(exec_body,
+            "Original query: %s\n\nPlan:\n%s\n\n%s",
+            user_query, plan,
+            run_critic ? "Now execute the plan step by step."
+                       : "Now write the complete, well-structured final answer for the user.");
+    char *exec_input = with_system(system_prompt, exec_body);
+    free(exec_body);
+    if (!exec_input) { free(plan); return -1; }
 
+    if (stage_cb) stage_cb(ES_ORCH_STAGE_EXECUTING, stage_ud);
     if (orch->verbose) fprintf(stderr, "[orch] stage=executor ...\n");
 
-    int32_t draft_len = es_agent_run(orch->executor, exec_input,
-                                     draft, ES_ORCH_BUF_SIZE, max_tokens_per_stage);
+    stream_accum_t draft_acc = {
+        .buf = malloc((size_t)ES_ORCH_FINAL_SIZE), .len = 0, .cap = ES_ORCH_FINAL_SIZE,
+        .user_cb = stream_cb, .user_data = stream_ud,
+    };
+    if (!draft_acc.buf) { free(exec_input); free(plan); return -1; }
+    draft_acc.buf[0] = '\0';
+
+    int32_t draft_gen = es_agent_run_stream(orch->executor, exec_input,
+                                            max_tokens_per_stage, accum_token_cb, &draft_acc);
     free(exec_input);
-    if (draft_len < 0) {
+    if (draft_gen < 0) {
         fprintf(stderr, "[orch] executor failed\n");
-        free(plan); free(draft);
+        free(draft_acc.buf); free(plan);
         return -1;
     }
-    if (orch->verbose) fprintf(stderr, "[orch] draft (%d chars):\n%s\n", draft_len, draft);
-    // Free executor KV — its output is already in `draft` string buffer
+    char *draft = draft_acc.buf;
+    if (orch->verbose) fprintf(stderr, "[orch] draft (%d chars):\n%s\n", draft_acc.len, draft);
+
+    // ── No critic: executor output IS the final answer ────────────────────
+    if (!run_critic) {
+        int32_t copy_len = draft_acc.len < out_len - 1 ? draft_acc.len : out_len - 1;
+        memcpy(out_buf, draft, (size_t)copy_len);
+        out_buf[copy_len] = '\0';
+        free(plan); free(draft);
+        if (orch->verbose) fprintf(stderr, "[orch] done (%d tokens by executor)\n", draft_gen);
+        return copy_len;
+    }
+
+    // Free executor KV — its output is already captured in `draft`
     es_engine_kv_seq_rm(orch->engine, orch->executor->seq_id, 0, -1);
     orch->executor->pos = 0;
 
     // ── Stage 3: Critic ───────────────────────────────────────────────────
-    char *critic_input = malloc((size_t)(ES_ORCH_BUF_SIZE * 2 + strlen(user_query) + 256));
+    char *critic_body = malloc((size_t)(plan_acc.len + draft_acc.len + strlen(user_query) + 256));
+    if (!critic_body) { free(plan); free(draft); return -1; }
+    sprintf(critic_body,
+            "Original query: %s\n\nPlan:\n%s\n\nDraft answer:\n%s\n\n"
+            "Provide the final, corrected, well-structured answer.",
+            user_query, plan, draft);
+    char *critic_input = with_system(system_prompt, critic_body);
+    free(critic_body);
     if (!critic_input) { free(plan); free(draft); return -1; }
-    snprintf(critic_input, ES_ORCH_BUF_SIZE * 2 + strlen(user_query) + 256,
-             "Original query: %s\n\nPlan:\n%s\n\nDraft answer:\n%s\n\n"
-             "Provide the final, corrected, well-structured answer.",
-             user_query, plan, draft);
 
+    if (stage_cb) stage_cb(ES_ORCH_STAGE_REVIEWING, stage_ud);
     if (orch->verbose) fprintf(stderr, "[orch] stage=critic ...\n");
 
-    critic_stream_state_t css = {
-        .buf       = malloc((size_t)ES_ORCH_FINAL_SIZE),
-        .len       = 0,
-        .cap       = ES_ORCH_FINAL_SIZE,
-        .user_cb   = stream_cb,
-        .user_data = stream_ud,
+    stream_accum_t crit_acc = {
+        .buf = malloc((size_t)ES_ORCH_FINAL_SIZE), .len = 0, .cap = ES_ORCH_FINAL_SIZE,
+        .user_cb = stream_cb, .user_data = stream_ud,
     };
-    if (!css.buf) { free(critic_input); free(plan); free(draft); return -1; }
-    css.buf[0] = '\0';
+    if (!crit_acc.buf) { free(critic_input); free(plan); free(draft); return -1; }
+    crit_acc.buf[0] = '\0';
 
     int32_t n_gen = es_agent_run_stream(orch->critic, critic_input,
-                                        max_tokens_per_stage, critic_token_cb, &css);
+                                        max_tokens_per_stage, accum_token_cb, &crit_acc);
     free(critic_input);
     free(plan);
     free(draft);
 
     if (n_gen < 0) {
-        free(css.buf);
+        free(crit_acc.buf);
         return -1;
     }
 
     // Copy critic output to caller's buffer
-    int32_t copy_len = css.len < out_len - 1 ? css.len : out_len - 1;
-    memcpy(out_buf, css.buf, (size_t)copy_len);
+    int32_t copy_len = crit_acc.len < out_len - 1 ? crit_acc.len : out_len - 1;
+    memcpy(out_buf, crit_acc.buf, (size_t)copy_len);
     out_buf[copy_len] = '\0';
-    free(css.buf);
+    free(crit_acc.buf);
 
     if (orch->verbose) fprintf(stderr, "[orch] done (%d tokens generated by critic)\n", n_gen);
     return copy_len;

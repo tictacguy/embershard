@@ -30,6 +30,12 @@ struct MessageBubble: View {
                         .foregroundStyle(.secondary)
                 }
 
+                // Agentic pipeline steps (planner / executor), collapsed by default
+                if !isUser && !message.agentSteps.isEmpty {
+                    AgentStepsView(steps: message.agentSteps,
+                                   activeStage: message.isStreaming ? message.agentStageName : nil)
+                }
+
                 // Bubble content
                 BubbleContent(message: message, isUser: isUser, bubbleColor: appState.accentColor)
 
@@ -110,6 +116,13 @@ private struct BubbleContent: View {
     let isUser: Bool
     var bubbleColor: Color = .accentColor
 
+    // While the planner is running (answer not yet started), the prominent
+    // Planning card stands in for the loader, so suppress the empty answer bubble.
+    private var showPlanningCardOnly: Bool {
+        !isUser && message.isStreaming && message.content.isEmpty
+            && message.agentStageName == "Planning" && !message.agentSteps.isEmpty
+    }
+
     var body: some View {
         Group {
             if isUser {
@@ -119,6 +132,10 @@ private struct BubbleContent: View {
                     .padding(.vertical, 10)
                     .background(bubbleColor, in: RoundedRectangle(cornerRadius: 18))
                     .foregroundStyle(.white)
+            } else if showPlanningCardOnly {
+                // The prominent Planning card (rendered above) is the sole visible
+                // element while the planner works — no empty answer bubble.
+                EmptyView()
             } else {
                 VStack(alignment: .leading, spacing: 0) {
                     if message.content.isEmpty && message.isStreaming {
@@ -157,20 +174,30 @@ private struct MarkdownText: View {
     init(_ text: String) { self.text = text }
 
     var body: some View {
-        VStack(alignment: .leading, spacing: 8) {
+        VStack(alignment: .leading, spacing: 7) {
             ForEach(Array(parseBlocks().enumerated()), id: \.offset) { _, block in
                 switch block {
-                case .text(let content):
-                    if let attributed = try? AttributedString(markdown: content,
-                        options: .init(interpretedSyntax: .inlineOnlyPreservingWhitespace)) {
-                        Text(attributed)
-                            .font(.body)
-                            .fixedSize(horizontal: false, vertical: true)
-                    } else {
-                        Text(content)
-                            .font(.body)
-                            .fixedSize(horizontal: false, vertical: true)
+                case .heading(let level, let content):
+                    inline(content)
+                        .font(headingFont(level))
+                        .fixedSize(horizontal: false, vertical: true)
+                        .padding(.top, level <= 2 ? 4 : 2)
+                case .paragraph(let content):
+                    inline(content)
+                        .font(.body)
+                        .fixedSize(horizontal: false, vertical: true)
+                case .bullet(let content):
+                    HStack(alignment: .top, spacing: 8) {
+                        Text("•").font(.body).foregroundStyle(.secondary)
+                        inline(content).font(.body).fixedSize(horizontal: false, vertical: true)
                     }
+                case .numbered(let marker, let content):
+                    HStack(alignment: .top, spacing: 8) {
+                        Text(marker).font(.body.monospacedDigit()).foregroundStyle(.secondary)
+                        inline(content).font(.body).fixedSize(horizontal: false, vertical: true)
+                    }
+                case .rule:
+                    Divider()
                 case .code(let lang, let content):
                     CodeBlockView(language: lang, code: content)
                 }
@@ -178,8 +205,30 @@ private struct MarkdownText: View {
         }
     }
 
+    // Render inline markdown (**bold**, *italic*, `code`, [links]) within one line.
+    private func inline(_ content: String) -> Text {
+        if let attributed = try? AttributedString(markdown: content,
+            options: .init(interpretedSyntax: .inlineOnlyPreservingWhitespace)) {
+            return Text(attributed)
+        }
+        return Text(content)
+    }
+
+    private func headingFont(_ level: Int) -> Font {
+        switch level {
+        case 1:  return .title2.weight(.bold)
+        case 2:  return .title3.weight(.bold)
+        case 3:  return .headline
+        default: return .subheadline.weight(.semibold)
+        }
+    }
+
     private enum Block {
-        case text(String)
+        case heading(Int, String)
+        case paragraph(String)
+        case bullet(String)
+        case numbered(String, String)
+        case rule
         case code(String, String) // language, content
     }
 
@@ -187,33 +236,108 @@ private struct MarkdownText: View {
         var blocks: [Block] = []
         let lines = text.components(separatedBy: "\n")
         var i = 0
-        var currentText = ""
+        var para: [String] = []
+
+        func flushPara() {
+            if !para.isEmpty {
+                blocks.append(.paragraph(para.joined(separator: "\n")))
+                para = []
+            }
+        }
 
         while i < lines.count {
             let line = lines[i]
-            if line.hasPrefix("```") {
-                if !currentText.isEmpty {
-                    blocks.append(.text(currentText.trimmingCharacters(in: .newlines)))
-                    currentText = ""
-                }
-                let lang = String(line.dropFirst(3)).trimmingCharacters(in: .whitespaces)
+            let trimmed = line.trimmingCharacters(in: .whitespaces)
+
+            // Fenced code block
+            if trimmed.hasPrefix("```") {
+                flushPara()
+                let lang = String(trimmed.dropFirst(3)).trimmingCharacters(in: .whitespaces)
                 var codeLines: [String] = []
                 i += 1
-                while i < lines.count && !lines[i].hasPrefix("```") {
-                    codeLines.append(lines[i])
-                    i += 1
+                while i < lines.count && !lines[i].trimmingCharacters(in: .whitespaces).hasPrefix("```") {
+                    codeLines.append(lines[i]); i += 1
                 }
                 blocks.append(.code(lang, codeLines.joined(separator: "\n")))
-                i += 1 // skip closing ```
-            } else {
-                currentText += (currentText.isEmpty ? "" : "\n") + line
                 i += 1
+                continue
             }
+
+            // ATX heading: #, ##, ### …
+            if let h = headingMatch(trimmed) {
+                flushPara()
+                blocks.append(.heading(h.level, h.text))
+                i += 1; continue
+            }
+
+            // Setext underline (==== under a heading) — the text above already
+            // carries the emphasis, so drop the underline to avoid literal noise.
+            if trimmed.count >= 2 && trimmed.allSatisfy({ $0 == "=" }) {
+                i += 1; continue
+            }
+            // Horizontal rule: a line of only -, *, or _ (3+)
+            if trimmed.count >= 3 &&
+               (trimmed.allSatisfy { $0 == "-" } ||
+                trimmed.allSatisfy { $0 == "*" } ||
+                trimmed.allSatisfy { $0 == "_" }) {
+                flushPara()
+                blocks.append(.rule)
+                i += 1; continue
+            }
+
+            // Bullet list: -, *, +
+            if let b = bulletMatch(trimmed) {
+                flushPara()
+                blocks.append(.bullet(b))
+                i += 1; continue
+            }
+
+            // Numbered list: "1. ", "2) " …
+            if let n = numberedMatch(trimmed) {
+                flushPara()
+                blocks.append(.numbered(n.marker, n.text))
+                i += 1; continue
+            }
+
+            // Blank line ends a paragraph
+            if trimmed.isEmpty {
+                flushPara()
+                i += 1; continue
+            }
+
+            para.append(line)
+            i += 1
         }
-        if !currentText.isEmpty {
-            blocks.append(.text(currentText.trimmingCharacters(in: .newlines)))
-        }
+        flushPara()
         return blocks
+    }
+
+    private func headingMatch(_ s: String) -> (level: Int, text: String)? {
+        guard s.hasPrefix("#") else { return nil }
+        var level = 0
+        for ch in s { if ch == "#" { level += 1 } else { break } }
+        guard level >= 1 && level <= 6 else { return nil }
+        let rest = s.dropFirst(level)
+        guard rest.first == " " else { return nil }
+        return (level, rest.trimmingCharacters(in: .whitespaces))
+    }
+
+    private func bulletMatch(_ s: String) -> String? {
+        for p in ["- ", "* ", "+ "] where s.hasPrefix(p) {
+            return String(s.dropFirst(2)).trimmingCharacters(in: .whitespaces)
+        }
+        return nil
+    }
+
+    private func numberedMatch(_ s: String) -> (marker: String, text: String)? {
+        var digits = ""
+        for ch in s { if ch.isNumber { digits.append(ch) } else { break } }
+        guard !digits.isEmpty, digits.count <= 3 else { return nil }
+        let after = s.dropFirst(digits.count)
+        guard after.first == "." || after.first == ")" else { return nil }
+        let rest = after.dropFirst()
+        guard rest.first == " " else { return nil }
+        return ("\(digits).", rest.trimmingCharacters(in: .whitespaces))
     }
 }
 
@@ -263,6 +387,89 @@ private struct CodeBlockView: View {
             RoundedRectangle(cornerRadius: 8)
                 .stroke(Color.primary.opacity(0.08), lineWidth: 1)
         )
+    }
+}
+
+// MARK: - Agent pipeline steps
+
+private struct AgentStepsView: View {
+    let steps: [AgentStep]
+    var activeStage: String? = nil   // e.g. "Executing..." while that stage streams
+
+    var body: some View {
+        VStack(alignment: .leading, spacing: 4) {
+            ForEach(Array(steps.enumerated()), id: \.offset) { _, step in
+                AgentStepRow(step: step, isActive: isActive(step))
+            }
+        }
+        .frame(maxWidth: 520, alignment: .leading)
+    }
+
+    // The step whose name matches the live stage label is currently generating.
+    private func isActive(_ step: AgentStep) -> Bool {
+        guard let activeStage else { return false }
+        return activeStage.lowercased().hasPrefix(step.title.lowercased())
+    }
+}
+
+private struct AgentStepRow: View {
+    let step: AgentStep
+    let isActive: Bool
+    @State private var expanded = false
+
+    // While the step is generating it shows prominently (large icon/font, the
+    // plan streaming live); once done it collapses to a compact, expandable card.
+    private var showContent: Bool { isActive || expanded }
+
+    var body: some View {
+        VStack(alignment: .leading, spacing: 0) {
+            Button {
+                withAnimation(.easeInOut(duration: 0.15)) { expanded.toggle() }
+            } label: {
+                HStack(spacing: isActive ? 9 : 6) {
+                    Image(systemName: step.icon)
+                        .font(isActive ? .title3 : .caption)
+                        .frame(width: isActive ? 24 : 16)
+                    Text(isActive ? "\(step.title)…" : step.title)
+                        .font(isActive ? .headline : .caption.weight(.semibold))
+                    if isActive {
+                        ProgressView()
+                            .controlSize(.small)
+                            .padding(.leading, 2)
+                    }
+                    Spacer(minLength: 8)
+                    if !isActive {
+                        Image(systemName: "chevron.right")
+                            .font(.system(size: 9, weight: .semibold))
+                            .rotationEffect(.degrees(expanded ? 90 : 0))
+                    }
+                }
+                .foregroundStyle(isActive ? .primary : .secondary)
+                .padding(.horizontal, isActive ? 14 : 10)
+                .padding(.vertical, isActive ? 11 : 6)
+                .contentShape(Rectangle())
+            }
+            .buttonStyle(.plain)
+            .disabled(isActive)
+
+            if showContent && !(step.content.isEmpty && !isActive) {
+                Text(step.content.isEmpty ? "…" : step.content)
+                    .font(.callout)
+                    .foregroundStyle(.secondary)
+                    .textSelection(.enabled)
+                    .frame(maxWidth: .infinity, alignment: .leading)
+                    .padding(.horizontal, isActive ? 14 : 10)
+                    .padding(.bottom, isActive ? 12 : 8)
+            }
+        }
+        .background(Color.primary.opacity(isActive ? 0.05 : 0.03),
+                    in: RoundedRectangle(cornerRadius: 10))
+        .overlay(
+            RoundedRectangle(cornerRadius: 10)
+                .stroke(isActive ? Color.accentColor.opacity(0.35) : Color.primary.opacity(0.08),
+                        lineWidth: 1)
+        )
+        .frame(maxWidth: isActive ? .infinity : nil, alignment: .leading)
     }
 }
 

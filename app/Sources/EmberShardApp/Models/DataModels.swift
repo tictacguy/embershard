@@ -2,6 +2,14 @@ import Foundation
 
 // MARK: - Message
 
+// One intermediate stage of the agentic pipeline (planner / executor), shown as
+// a collapsible section above the final answer.
+struct AgentStep: Codable, Hashable {
+    var title: String        // "Planning" | "Executing"
+    var icon: String         // SF Symbol
+    var content: String = ""
+}
+
 struct Message: Codable, Identifiable {
     var id: UUID = UUID()
     var role: String        // "user" | "assistant" | "system"
@@ -10,13 +18,14 @@ struct Message: Codable, Identifiable {
     var modelName: String = ""
     var tokenCount: Int = 0         // tokens generated (0 = unknown / user message)
     var contextFraction: Double = 0 // fraction of context window in use when this was generated
+    var agentSteps: [AgentStep] = [] // intermediate planner/executor output (agent mode)
 
     // Transient — not persisted, reset on load
     var isStreaming: Bool = false
     var agentStageName: String? = nil  // "Planning…" / "Executing…" / "Reviewing…" during agent mode
 
     enum CodingKeys: String, CodingKey {
-        case id, role, content, timestamp, modelName, tokenCount, contextFraction
+        case id, role, content, timestamp, modelName, tokenCount, contextFraction, agentSteps
     }
 
     init(role: String, content: String = "", modelName: String = "") {
@@ -34,6 +43,7 @@ struct Message: Codable, Identifiable {
         modelName      = (try? c.decode(String.self, forKey: .modelName)) ?? ""
         tokenCount     = (try? c.decode(Int.self,    forKey: .tokenCount)) ?? 0
         contextFraction = (try? c.decode(Double.self, forKey: .contextFraction)) ?? 0
+        agentSteps     = (try? c.decode([AgentStep].self, forKey: .agentSteps)) ?? []
     }
 }
 
@@ -455,6 +465,22 @@ final class ChatStore: ObservableObject {
         guard let cidx = chats.firstIndex(where: { $0.id == chatId }),
               let midx = chats[cidx].messages.firstIndex(where: { $0.id == msgId }) else { return }
         chats[cidx].messages[midx].agentStageName = stageName
+    }
+
+    // Begin a new collapsible agent step (planner / executor) on a streaming message.
+    func beginAgentStep(msgId: UUID, inChatId chatId: UUID, title: String, icon: String) {
+        guard let cidx = chats.firstIndex(where: { $0.id == chatId }),
+              let midx = chats[cidx].messages.firstIndex(where: { $0.id == msgId }) else { return }
+        chats[cidx].messages[midx].agentSteps.append(AgentStep(title: title, icon: icon))
+    }
+
+    // Append a streamed token piece to the most recent agent step.
+    func appendToAgentStep(msgId: UUID, inChatId chatId: UUID, piece: String) {
+        guard let cidx = chats.firstIndex(where: { $0.id == chatId }),
+              let midx = chats[cidx].messages.firstIndex(where: { $0.id == msgId }),
+              !chats[cidx].messages[midx].agentSteps.isEmpty else { return }
+        let last = chats[cidx].messages[midx].agentSteps.count - 1
+        chats[cidx].messages[midx].agentSteps[last].content += piece
     }
 
     func finishMessage(id msgId: UUID, inChatId chatId: UUID,

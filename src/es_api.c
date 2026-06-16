@@ -75,10 +75,10 @@ ESStatus es_create(const ESConfig *config, ESEngineRef *out_engine) {
         .model_path        = config->model_path,
         .n_gpu_layers      = config->n_gpu_layers != 0 ? config->n_gpu_layers : -1,
         .n_ctx             = config->n_ctx > 0 ? config->n_ctx : 8192,
-        .n_batch           = ES_API_BATCH_SIZE,
+        .n_batch           = config->n_batch > 0 ? config->n_batch : ES_API_BATCH_SIZE,
         .n_threads         = n_threads,
-        .use_mmap          = true,
-        .flash_attn        = true,
+        .use_mmap          = config->use_mmap,
+        .flash_attn        = config->flash_attn,
         .kv_quant          = (int32_t)config->kv_quant,
         .on_load_progress  = progress_shim,
         .load_progress_ud  = &shim_ctx,
@@ -354,6 +354,7 @@ ESHardwareInfo es_get_hw_info(void) {
 // --- Agentic pipeline ---
 
 ESStatus es_orchestrate(ESEngineRef engine,
+                         const char *system_prompt,
                          const char *user_query,
                          int32_t     max_tokens_per_stage,
                          void (*on_stage)(ESAgentStage stage, void *ud),
@@ -377,9 +378,6 @@ ESStatus es_orchestrate(ESEngineRef engine,
         return ES_STATUS_ERR_GEN;
     }
 
-    // Signal planning stage
-    if (on_stage) on_stage(ES_STAGE_PLANNING, user_data);
-
     char *out_buf = malloc(32768);
     if (!out_buf) {
         es_orchestrator_free(orch);
@@ -387,15 +385,23 @@ ESStatus es_orchestrate(ESEngineRef engine,
         return ES_STATUS_OOM;
     }
 
-    // The orchestrator runs Planner -> Executor -> Critic internally
-    // We stream tokens from the critic (final) stage
-    int32_t n = es_orchestrator_run(orch, user_query, max_tokens_per_stage,
+    // Planner → Executor. The planner's steps stream during ES_STAGE_PLANNING;
+    // the executor's answer streams during ES_STAGE_EXECUTING as the final
+    // response. run_critic=false keeps the pipeline lean (no extra synthesis pass).
+    int32_t n = es_orchestrator_run(orch, system_prompt, user_query,
+                                     max_tokens_per_stage, /*run_critic=*/false,
                                      out_buf, 32768,
-                                     (es_orch_stream_cb)on_token, user_data);
+                                     (es_orch_stream_cb)on_token, user_data,
+                                     (es_orch_stage_cb)on_stage, user_data);
 
+    // Surface the executor (final) stage's context usage so es_ctx_used reflects
+    // how full the window got during the pipeline (the agents track their own
+    // positions, which are otherwise lost when the orchestrator is freed).
+    int32_t final_pos = orch->executor ? orch->executor->pos : 0;
     es_orchestrator_free(orch);
     free(out_buf);
 
+    eng->pos = final_pos;
     eng->last_n_tokens = n > 0 ? n : 0;
 
     ESStatus status = (n >= 0) ? ES_STATUS_OK : ES_STATUS_ERR_GEN;

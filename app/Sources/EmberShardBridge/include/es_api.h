@@ -46,9 +46,12 @@ typedef struct {
     int32_t     n_ctx;          // context window size (default 4096)
     int32_t     n_gpu_layers;   // Metal layers (-1 = all)
     int32_t     n_threads;      // CPU threads (0 = auto)
+    int32_t     n_batch;        // logical batch size (0 = default 512)
     float       temperature;    // 0.0 = greedy
     float       top_p;          // nucleus sampling (0.95 default)
     ESKVQuantType kv_quant;     // KV cache quantization (default F16)
+    bool        flash_attn;     // enable Flash Attention (recommended on Metal)
+    bool        use_mmap;       // memory-map the model file
     // Called during model loading with progress in [0.0, 1.0]. Return false to abort.
     bool (*on_progress)(float progress, void *user_data);
     void *progress_ud;
@@ -84,9 +87,13 @@ ESStatus es_continue(ESEngineRef  engine,
                      void        *user_data);
 
 // ── Agentic pipeline ─────────────────────────────────────────────────────────
-// Runs Planner → Executor → Critic. on_stage fires at each stage transition.
-// on_token fires for each output piece from the Critic (final) stage.
+// Runs Planner → Executor. on_stage fires at each stage transition. on_token
+// fires for each output piece: planner tokens during ES_STAGE_PLANNING, then the
+// executor's answer during ES_STAGE_EXECUTING (the final streamed response).
+// system_prompt (nullable): extra instructions (e.g. an active skill) injected
+// into every agent so the pipeline honors the user's selected behaviour.
 ESStatus es_orchestrate(ESEngineRef engine,
+                         const char *system_prompt,
                          const char *user_query,
                          int32_t     max_tokens_per_stage,
                          void (*on_stage)(ESAgentStage stage, void *ud),

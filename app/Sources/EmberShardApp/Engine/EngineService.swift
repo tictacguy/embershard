@@ -10,7 +10,10 @@ struct EngineConfig {
     var topP: Float = 0.95
     var gpuLayers: Int32 = -1
     var threads: Int32 = 0
+    var batchSize: Int32 = 512
     var kvQuant: ESKVQuantType = ES_KV_QUANT_F16
+    var flashAttn: Bool = true
+    var useMmap: Bool = true
 }
 
 // MARK: - Events
@@ -74,9 +77,12 @@ final class EngineService: ObservableObject {
         cConfig.n_ctx        = config.contextSize
         cConfig.n_gpu_layers = config.gpuLayers
         cConfig.n_threads    = config.threads
+        cConfig.n_batch      = config.batchSize
         cConfig.temperature  = config.temperature
         cConfig.top_p        = config.topP
         cConfig.kv_quant     = config.kvQuant
+        cConfig.flash_attn   = config.flashAttn
+        cConfig.use_mmap     = config.useMmap
 
         let box = ProgressBox(callback: onProgress)
         let boxPtr = Unmanaged.passRetained(box).toOpaque()
@@ -193,7 +199,8 @@ final class EngineService: ObservableObject {
 
     // MARK: - Agentic Pipeline
 
-    func orchestrate(userText: String, maxTokensPerStage: Int32 = 1024) -> AsyncThrowingStream<AgentEvent, Error> {
+    func orchestrate(systemPrompt: String?, userText: String,
+                     maxTokensPerStage: Int32 = 1024) -> AsyncThrowingStream<AgentEvent, Error> {
         AsyncThrowingStream { continuation in
             Task { @EngineActor in
                 guard let eng = self.engine else {
@@ -230,8 +237,10 @@ final class EngineService: ObservableObject {
                     }
                 }
 
+                let sysCStr = systemPrompt.flatMap { $0.isEmpty ? nil : ($0 as NSString).utf8String }
                 let queryCStr = (userText as NSString).utf8String!
-                _ = es_orchestrate(eng, queryCStr, maxTokensPerStage, onStage, onToken, onDone, boxPtr)
+                _ = es_orchestrate(eng, sysCStr ?? nil, queryCStr, maxTokensPerStage,
+                                   onStage, onToken, onDone, boxPtr)
             }
         }
     }

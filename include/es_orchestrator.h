@@ -24,6 +24,17 @@
 // Called with each token piece during critic (final stage) generation.
 typedef void (*es_orch_stream_cb)(const char *piece, void *user_data);
 
+// Pipeline stages, reported via es_orch_stage_cb as each one begins.
+// Values match ESAgentStage in es_api.h (0/1/2).
+typedef enum {
+    ES_ORCH_STAGE_PLANNING  = 0,
+    ES_ORCH_STAGE_EXECUTING = 1,
+    ES_ORCH_STAGE_REVIEWING = 2,
+} es_orch_stage_t;
+
+// Called when each pipeline stage begins (nullable).
+typedef void (*es_orch_stage_cb)(es_orch_stage_t stage, void *user_data);
+
 typedef struct {
     es_engine_t  *engine;
     es_kvcache_t *kvcache;
@@ -38,13 +49,19 @@ typedef struct {
 es_orchestrator_t *es_orchestrator_create(es_engine_t *engine, bool verbose);
 void               es_orchestrator_free(es_orchestrator_t *orch);
 
-// Run full pipeline (Planner → Executor → Critic).
+// Run the pipeline (Planner → Executor [→ Critic]).
 // out_buf must hold at least out_len bytes.
-// stream_cb (nullable): called with each token piece from the critic stage.
+// system_prompt (nullable): extra instructions injected into every agent.
+// run_critic: when true, runs the Critic synthesis stage and streams it as the
+//   final answer; when false, the Executor's output is the final streamed answer.
+// stream_cb (nullable): called with each token piece (all stages stream live).
+// stage_cb  (nullable): called as each stage begins.
 // Returns chars written to out_buf, or -1 on error.
-int32_t es_orchestrator_run(es_orchestrator_t *orch, const char *user_query,
-                             int32_t max_tokens_per_stage,
+int32_t es_orchestrator_run(es_orchestrator_t *orch,
+                             const char *system_prompt, const char *user_query,
+                             int32_t max_tokens_per_stage, bool run_critic,
                              char *out_buf, int32_t out_len,
-                             es_orch_stream_cb stream_cb, void *stream_ud);
+                             es_orch_stream_cb stream_cb, void *stream_ud,
+                             es_orch_stage_cb  stage_cb,  void *stage_ud);
 
 #endif // ES_ORCHESTRATOR_H

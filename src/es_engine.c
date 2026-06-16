@@ -55,6 +55,11 @@ es_engine_t *es_engine_init(es_engine_config_t config) {
     struct llama_context_params ctx_params = llama_context_default_params();
     ctx_params.n_ctx = config.n_ctx;
     ctx_params.n_seq_max = config.n_seq_max > 0 ? config.n_seq_max : 16;
+    // Unified KV cache: share the full n_ctx buffer across all sequences instead
+    // of partitioning it into n_ctx/n_seq_max slabs per sequence. Without this,
+    // each sequence (including the main chat at seq 0) is capped at n_ctx/n_seq_max
+    // tokens — e.g. 8192/16 = 512 — which silently truncates long generations.
+    ctx_params.kv_unified = true;
     ctx_params.n_batch = config.n_batch;
     ctx_params.n_threads = config.n_threads;
     ctx_params.flash_attn_type = config.flash_attn

@@ -113,29 +113,34 @@ struct ChatView: View {
     // MARK: - Routing
 
     private func sendOrOrchestrate() {
-        if agentMode && needsAgenticPipeline(inputText) {
+        // Agent mode is an explicit, opt-in toggle: when the user turns it on we
+        // run the planner→executor→critic pipeline for any real question. The only
+        // bypass is for trivial greetings/small-talk, so "ciao" stays a direct
+        // reply instead of spinning up the whole pipeline.
+        if agentMode && !isTrivialGreeting(inputText) {
             orchestrateMessage()
         } else {
             sendMessage()
         }
     }
 
-    // Returns true only for queries complex enough to benefit from the
-    // planner→executor→critic pipeline. Short/conversational messages bypass it.
-    private func needsAgenticPipeline(_ text: String) -> Bool {
+    // True for short greetings / small-talk that should never trigger the
+    // agentic pipeline even when agent mode is on.
+    private func isTrivialGreeting(_ text: String) -> Bool {
         let trimmed = text.trimmingCharacters(in: .whitespacesAndNewlines)
-        let words = trimmed.split(separator: " ")
-        guard words.count >= 8 else { return false }
+            .lowercased()
+        let words = trimmed.split { $0 == " " || $0 == "\n" }
+        // Anything longer than a few words is a real request → use the pipeline.
+        guard words.count <= 3 else { return false }
 
-        let lower = trimmed.lowercased()
-        let complexTriggers = [
-            "how", "why", "explain", "analyze", "analyse", "compare", "describe",
-            "summarize", "summarise", "write", "create", "build", "design",
-            "what is", "what are", "what does", "step by step",
-            "come", "perché", "spiega", "analizza", "confronta", "scrivi",
-            "crea", "descri", "riassumi", "progetta",
+        let greetings: Set<String> = [
+            "ciao", "salve", "hey", "hi", "hello", "yo", "buongiorno", "buonasera",
+            "hola", "ehi", "ok", "okay", "grazie", "thanks", "thank you", "test",
+            "come stai", "how are you", "what's up", "whats up", "sup",
         ]
-        return complexTriggers.contains { lower.contains($0) }
+        if greetings.contains(trimmed) { return true }
+        // Single short word with no question mark → treat as small-talk.
+        return words.count == 1 && !trimmed.contains("?")
     }
 
     // MARK: - Chat (direct)
@@ -238,9 +243,15 @@ struct ChatView: View {
 
         appState.isGenerating = true
         let msgId = assistantMsg.id
-        let isFirst = messages.filter { $0.role == "user" }.count == 1
+
+        let systemPrompt = resolvedSystemPrompt()
 
         generationTask = Task {
+            // Pipeline = Planner → Executor. Planner steps stream into a collapsible
+            // "Planning" card; the executor's answer streams into the message body
+            // as the final response.
+            var currentStage: ESAgentStage = ES_STAGE_PLANNING
+            var answerTokens = 0
             do {
                 let engine = EngineService.shared
 
@@ -250,19 +261,34 @@ struct ChatView: View {
                 }
 
                 let maxTok = Int32(UserDefaults.standard.integer(forKey: "es_max_tokens").nonZeroOr(2048))
-                let stream = await engine.orchestrate(userText: text, maxTokensPerStage: maxTok)
+                let stream = await engine.orchestrate(systemPrompt: systemPrompt,
+                                                      userText: text, maxTokensPerStage: maxTok)
 
                 for try await event in stream {
                     guard !Task.isCancelled else { break }
                     switch event {
                     case .stage(let stage):
-                        let name = agentStageName(stage)
+                        currentStage = stage
                         await MainActor.run {
-                            chatStore.setAgentStage(msgId: msgId, inChatId: chatId, stageName: name)
+                            if stage == ES_STAGE_PLANNING {
+                                chatStore.setAgentStage(msgId: msgId, inChatId: chatId, stageName: "Planning")
+                                chatStore.beginAgentStep(msgId: msgId, inChatId: chatId,
+                                                         title: "Planning", icon: "list.bullet.rectangle")
+                            } else {
+                                // Executor is the final answer — clear the stage label
+                                // so the message body shows the streaming response.
+                                chatStore.setAgentStage(msgId: msgId, inChatId: chatId, stageName: nil)
+                            }
                         }
                     case .token(let piece):
+                        let stage = currentStage
+                        if stage != ES_STAGE_PLANNING { answerTokens += 1 }
                         await MainActor.run {
-                            chatStore.appendToMessage(id: msgId, inChatId: chatId, piece: piece)
+                            if stage == ES_STAGE_PLANNING {
+                                chatStore.appendToAgentStep(msgId: msgId, inChatId: chatId, piece: piece)
+                            } else {
+                                chatStore.appendToMessage(id: msgId, inChatId: chatId, piece: piece)
+                            }
                         }
                     }
                 }
@@ -276,7 +302,7 @@ struct ChatView: View {
             }
 
             await MainActor.run {
-                finishGeneration(msgId: msgId)
+                finishGeneration(msgId: msgId, tokenCount: answerTokens)
                 if chat?.title == "New chat" {
                     generateTitle(for: chatId, from: text)
                 }
@@ -290,43 +316,36 @@ struct ChatView: View {
         Task {
             let engine = EngineService.shared
             let stream = await engine.generate(
-                systemPrompt: "Respond ONLY in this format, nothing else:\nICON: <sfSymbolName>\nTITLE: <short title max 6 words>\nChoose from: book, globe, chevron.left.forwardslash.chevron.right, music.note, heart, star, lightbulb, cart, airplane, camera, gamecontroller, film, pencil, doc.text, chart.bar, hammer, paintbrush, leaf, bolt, cpu, house, person, gift, bell, flag",
+                systemPrompt: "You generate short chat titles. Reply with ONLY the title (3-5 words, no quotes, no explanation).",
                 userText: userMessage,
-                maxTokens: 30
+                maxTokens: 15
             )
 
             var result = ""
             do { for try await piece in stream { result += piece } } catch {}
 
-            let lines = result.trimmingCharacters(in: .whitespacesAndNewlines)
-                .components(separatedBy: .newlines)
+            var title = result.trimmingCharacters(in: .whitespacesAndNewlines)
+                .replacingOccurrences(of: "\"", with: "")
+                .components(separatedBy: .newlines).first ?? ""
 
-            var icon = "bubble.left"
-            var title = ""
-
-            for line in lines {
-                let trimmed = line.trimmingCharacters(in: .whitespaces)
-                if trimmed.lowercased().hasPrefix("icon:") {
-                    let val = trimmed.dropFirst(5).trimmingCharacters(in: .whitespaces)
-                    if !val.isEmpty { icon = val }
-                } else if trimmed.lowercased().hasPrefix("title:") {
-                    title = trimmed.dropFirst(6).trimmingCharacters(in: .whitespaces)
-                        .replacingOccurrences(of: "\"", with: "")
+            // Remove common prefixes the model might add
+            for prefix in ["Title:", "title:", "TITLE:", "Sure!", "Here"] {
+                if title.hasPrefix(prefix) {
+                    title = String(title.dropFirst(prefix.count)).trimmingCharacters(in: .whitespaces)
                 }
             }
 
-            // Fallback if parsing failed
-            if title.isEmpty {
-                title = result.trimmingCharacters(in: .whitespacesAndNewlines)
-                    .replacingOccurrences(of: "\"", with: "")
-                    .prefix(60).description
+            if title.isEmpty || title.count < 2 {
+                title = String(userMessage.prefix(40))
             }
 
-            if !title.isEmpty {
-                await MainActor.run {
-                    chatStore.setChatTitle(id: chatId, title: String(title.prefix(60)))
-                    chatStore.setChatIcon(id: chatId, icon: icon)
-                }
+            let finalTitle = String(title.prefix(50))
+
+            await MainActor.run {
+                chatStore.setChatTitle(id: chatId, title: finalTitle)
+                // Infer icon from title keywords
+                let icon = IconCatalog.resolve(rawIcon: "", title: finalTitle)
+                chatStore.setChatIcon(id: chatId, icon: icon)
             }
         }
     }
@@ -359,13 +378,19 @@ struct ChatView: View {
     }
 
     private func buildEngineConfig() -> EngineConfig {
-        let ctxSize   = UserDefaults.standard.integer(forKey: "es_ctx_size").nonZeroOr(8192)
-        let temp      = UserDefaults.standard.double(forKey: "es_temperature").nonZeroOr(0.7)
-        let topP      = UserDefaults.standard.double(forKey: "es_top_p").nonZeroOr(0.95)
-        let gpuLayers = UserDefaults.standard.integer(forKey: "es_gpu_layers")
-        let threads   = UserDefaults.standard.integer(forKey: "es_threads")
-        let kvRaw     = UserDefaults.standard.integer(forKey: "es_kv_quant")
+        let d = UserDefaults.standard
+        let ctxSize   = d.integer(forKey: "es_ctx_size").nonZeroOr(8192)
+        let temp      = d.double(forKey: "es_temperature").nonZeroOr(0.7)
+        let topP      = d.double(forKey: "es_top_p").nonZeroOr(0.95)
+        let gpuLayers = d.integer(forKey: "es_gpu_layers")
+        let threads   = d.integer(forKey: "es_threads")
+        let batchSize = d.integer(forKey: "es_batch_size").nonZeroOr(512)
+        let kvRaw     = d.integer(forKey: "es_kv_quant")
         let kvQuant   = ESKVQuantType(rawValue: UInt32(kvRaw))
+        // Booleans: AppStorage defaults aren't written to UserDefaults until the
+        // user toggles them, so fall back to the recommended default when unset.
+        let flashAttn = d.object(forKey: "es_flash_attn") as? Bool ?? true
+        let useMmap   = d.object(forKey: "es_use_mmap")   as? Bool ?? true
         return EngineConfig(
             modelPath: modelStore.activeModelPath,
             contextSize: Int32(ctxSize),
@@ -373,7 +398,10 @@ struct ChatView: View {
             topP: Float(topP),
             gpuLayers: Int32(gpuLayers == 0 ? -1 : gpuLayers),
             threads: Int32(threads),
-            kvQuant: kvQuant
+            batchSize: Int32(batchSize),
+            kvQuant: kvQuant,
+            flashAttn: flashAttn,
+            useMmap: useMmap
         )
     }
 
@@ -417,14 +445,6 @@ struct ChatView: View {
         }
     }
 
-    private func agentStageName(_ stage: ESAgentStage) -> String {
-        switch stage {
-        case ES_STAGE_PLANNING:  return "Planning..."
-        case ES_STAGE_EXECUTING: return "Executing..."
-        case ES_STAGE_REVIEWING: return "Reviewing..."
-        default:                 return "Working..."
-        }
-    }
 }
 
 // MARK: - Helpers

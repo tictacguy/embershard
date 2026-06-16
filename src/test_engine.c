@@ -25,7 +25,7 @@ static void fail(const char *name, const char *reason) {
 
 // ── Callbacks ──────────────────────────────────────────────────────────────
 
-typedef struct { char buf[16384]; int len; } Accum;
+typedef struct { char buf[65536]; int len; int n_tokens; } Accum;
 
 static void on_token(const char *piece, void *ud) {
     Accum *a = (Accum *)ud;
@@ -34,6 +34,7 @@ static void on_token(const char *piece, void *ud) {
         memcpy(a->buf + a->len, piece, (size_t)n);
         a->len += n;
     }
+    a->n_tokens++;
     fputs(piece, stdout);
     fflush(stdout);
 }
@@ -114,6 +115,7 @@ static void test_orchestrate(ESEngineRef eng) {
     printf("\n-- test: es_orchestrate (agentic pipeline) --\n");
     Accum a = {0};
     ESStatus st = es_orchestrate(eng,
+        NULL,
         "What is the capital of France?",
         256,
         on_stage, on_token, on_done, &a);
@@ -140,6 +142,37 @@ static void test_orchestrate(ESEngineRef eng) {
     }
 }
 
+// Long-output test: request a lengthy answer and verify generation runs to
+// near max_tokens (not cut off early at ~230). Reproduces the app truncation.
+static void test_long_output(ESEngineRef eng) {
+    printf("\n-- test: long output (truncation check) --\n");
+    Accum a = {0};
+    const int32_t MAXTOK = 600;
+    ESStatus st = es_generate(eng,
+        "You are a helpful assistant.",
+        "Write a detailed, multi-paragraph essay (at least 500 words) about the "
+        "history of the Roman Empire, from its founding to its fall. Include many "
+        "specific details, dates, emperors, and events. Do not stop early.",
+        MAXTOK,
+        on_token, on_done, &a);
+    printf("\n");
+    printf("  -> generated %d tokens, %d bytes\n", a.n_tokens, a.len);
+
+    if (st != ES_STATUS_OK) { fail("long output returns OK", "status != OK"); return; }
+    pass("long output returns OK");
+
+    // If the model genuinely hit EOS that's fine, but a ~230 cutoff while asked
+    // for 500+ words signals the truncation bug.
+    if (a.n_tokens < 300) {
+        char msg[128];
+        snprintf(msg, sizeof(msg), "stopped at only %d tokens (expected near %d)",
+                 a.n_tokens, MAXTOK);
+        fail("long output not truncated early", msg);
+    } else {
+        pass("long output not truncated early");
+    }
+}
+
 // ── Entry point ────────────────────────────────────────────────────────────
 
 int main(int argc, char **argv) {
@@ -159,6 +192,8 @@ int main(int argc, char **argv) {
         .temperature  = 0.0f,   // greedy for deterministic tests
         .top_p        = 1.0f,
         .kv_quant     = ES_KV_QUANT_F16,
+        .flash_attn   = true,
+        .use_mmap     = true,
     };
 
     printf("\nLoading model...\n");
@@ -172,6 +207,7 @@ int main(int argc, char **argv) {
 
     test_generate(eng);
     test_continue(eng);
+    test_long_output(eng);
     test_orchestrate(eng);
 
     es_destroy(eng);
