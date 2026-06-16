@@ -39,6 +39,12 @@ final class NativeEngine {
         return String(cString: c)
     }
 
+    func needsReload(for path: String) -> Bool { model == nil || loadedPath != path }
+
+    // KV fill / capacity of the resident model (for the context-usage indicator).
+    var contextUsed: Int { model.map { Int(es_gx_n_past($0)) } ?? 0 }
+    var contextMax:  Int { model.map { Int(es_gx_n_ctx($0)) } ?? 0 }
+
     func ensureLoaded(path: String, nCtx: Int32, kvQuant: Int32) -> Bool {
         if model != nil && loadedPath == path { return true }
         if let m = model { es_gx_free(m); model = nil; loadedPath = ""; liveChat = nil }
@@ -155,65 +161,78 @@ final class NativeEngine {
         Unmanaged<CBBox>.fromOpaque(ud).release()
     }
 
-    // One-shot completion that does NOT touch the live chat KV (used sparingly).
-    func oneShot(prompt: String, maxTokens: Int32, temp: Float) -> String {
+    // One-shot, chat-templated, greedy completion. Clobbers the live chat KV
+    // (so the next chat turn re-prefills) — used for title/icon generation.
+    func complete(system: String?, user: String, maxTokens: Int32) -> String {
         guard let m = model else { return "" }
-        liveChat = nil   // we are about to clobber the KV
-        final class Acc: @unchecked Sendable { var s = "" }
-        let acc = Acc()
-        let ud = Unmanaged.passRetained(acc).toOpaque()
+        liveChat = nil
+        es_gx_set_sampling(m, es_gx_sampling(temp: 0, top_p: 1, top_k: 0, min_p: 0,
+                                             repeat_penalty: 1.1, repeat_last_n: 64, seed: 0))
+        let prompt = buildPrompt(system: system, history: [], user: user, continuation: false)
+        es_gx_reset(m)
+        guard prompt.withCString({ es_gx_ingest(m, $0, false, true) == 0 }) else { return "" }
+        var out = ""
+        let box = CBBox({ out += $0 })
+        let ud = Unmanaged.passRetained(box).toOpaque()
         let cb: @convention(c) (UnsafePointer<CChar>?, UnsafeMutableRawPointer?) -> Void = { p, ud in
             guard let p, let ud else { return }
-            Unmanaged<Acc>.fromOpaque(ud).takeUnretainedValue().s += String(cString: p)
+            Unmanaged<CBBox>.fromOpaque(ud).takeUnretainedValue().f(String(cString: p))
         }
-        _ = es_gx_generate(m, prompt, maxTokens, temp, 0.95, false, true, cb, ud)
-        Unmanaged<Acc>.fromOpaque(ud).release()
-        return acc.s
+        _ = es_gx_generate_stream(m, maxTokens, cb, ud)
+        Unmanaged<CBBox>.fromOpaque(ud).release()
+        return out
     }
 
-    // ── chat templating (llama3 / qwen2) ─────────────────────────────────────
+    // ── chat templating (llama3 / qwen2 / spm) ───────────────────────────────
     private func buildPrompt(system: String?, history: [NativeTurn], user: String,
                              continuation: Bool) -> String {
-        let sys = (system?.isEmpty == false) ? system! : nil
-        if isSPM {
-            // Llama 2 / Mistral style: <s>[INST] ... [/INST] answer </s> …
-            if continuation {
-                return " </s><s>[INST] \(user) [/INST]"
-            }
-            var p = "<s>[INST] "
-            if let sys { p += "<<SYS>>\n\(sys)\n<</SYS>>\n\n" }
-            for t in history where t.role == "user" || t.role == "assistant" {
-                if t.role == "user" { p += "\(t.content) [/INST]" }
-                else                { p += " \(t.content) </s><s>[INST] " }
-            }
-            p += "\(user) [/INST]"
-            return p
+        gxChatPrompt(isSPM: isSPM, isQwen: isQwen, system: system,
+                     history: history, user: user, continuation: continuation)
+    }
+}
+
+// Free chat-template builder so other engines (Compare) can reuse it per model.
+func gxChatPrompt(isSPM: Bool, isQwen: Bool, system: String?,
+                  history: [NativeTurn], user: String, continuation: Bool) -> String {
+    let sys = (system?.isEmpty == false) ? system! : nil
+    if isSPM {
+        // Llama 2 / Mistral style: <s>[INST] ... [/INST] answer </s> …
+        if continuation {
+            return " </s><s>[INST] \(user) [/INST]"
         }
-        if isQwen {
-            if continuation {
-                return "<|im_end|>\n<|im_start|>user\n\(user)<|im_end|>\n<|im_start|>assistant\n"
-            }
-            var p = ""
-            if let sys { p += "<|im_start|>system\n\(sys)<|im_end|>\n" }
-            for t in history where t.role == "user" || t.role == "assistant" {
-                p += "<|im_start|>\(t.role)\n\(t.content)<|im_end|>\n"
-            }
-            p += "<|im_start|>user\n\(user)<|im_end|>\n<|im_start|>assistant\n"
-            return p
-        } else { // llama3
-            if continuation {
-                return "<|eot_id|><|start_header_id|>user<|end_header_id|>\n\n\(user)<|eot_id|>"
-                     + "<|start_header_id|>assistant<|end_header_id|>\n\n"
-            }
-            var p = "<|begin_of_text|>"
-            if let sys { p += "<|start_header_id|>system<|end_header_id|>\n\n\(sys)<|eot_id|>" }
-            for t in history where t.role == "user" || t.role == "assistant" {
-                p += "<|start_header_id|>\(t.role)<|end_header_id|>\n\n\(t.content)<|eot_id|>"
-            }
-            p += "<|start_header_id|>user<|end_header_id|>\n\n\(user)<|eot_id|>"
-            p += "<|start_header_id|>assistant<|end_header_id|>\n\n"
-            return p
+        var p = "<s>[INST] "
+        if let sys { p += "<<SYS>>\n\(sys)\n<</SYS>>\n\n" }
+        for t in history where t.role == "user" || t.role == "assistant" {
+            if t.role == "user" { p += "\(t.content) [/INST]" }
+            else                { p += " \(t.content) </s><s>[INST] " }
         }
+        p += "\(user) [/INST]"
+        return p
+    }
+    if isQwen {
+        if continuation {
+            return "<|im_end|>\n<|im_start|>user\n\(user)<|im_end|>\n<|im_start|>assistant\n"
+        }
+        var p = ""
+        if let sys { p += "<|im_start|>system\n\(sys)<|im_end|>\n" }
+        for t in history where t.role == "user" || t.role == "assistant" {
+            p += "<|im_start|>\(t.role)\n\(t.content)<|im_end|>\n"
+        }
+        p += "<|im_start|>user\n\(user)<|im_end|>\n<|im_start|>assistant\n"
+        return p
+    } else { // llama3
+        if continuation {
+            return "<|eot_id|><|start_header_id|>user<|end_header_id|>\n\n\(user)<|eot_id|>"
+                 + "<|start_header_id|>assistant<|end_header_id|>\n\n"
+        }
+        var p = "<|begin_of_text|>"
+        if let sys { p += "<|start_header_id|>system<|end_header_id|>\n\n\(sys)<|eot_id|>" }
+        for t in history where t.role == "user" || t.role == "assistant" {
+            p += "<|start_header_id|>\(t.role)<|end_header_id|>\n\n\(t.content)<|eot_id|>"
+        }
+        p += "<|start_header_id|>user<|end_header_id|>\n\n\(user)<|eot_id|>"
+        p += "<|start_header_id|>assistant<|end_header_id|>\n\n"
+        return p
     }
 }
 
@@ -227,4 +246,20 @@ private final class NativeBox: @unchecked Sendable {
 private final class CBBox: @unchecked Sendable {
     let f: (String) -> Void
     init(_ f: @escaping (String) -> Void) { self.f = f }
+}
+
+// Shared: build the native sampler from the user's Inference settings.
+func nativeSamplingFromSettings() -> es_gx_sampling {
+    let d = UserDefaults.standard
+    func f(_ k: String, _ def: Double) -> Float { Float(d.object(forKey: k) as? Double ?? def) }
+    func i(_ k: String, _ def: Int) -> Int32 { Int32(d.object(forKey: k) as? Int ?? def) }
+    return es_gx_sampling(
+        temp:           f("es_temperature", 0.7),
+        top_p:          f("es_top_p", 0.95),
+        top_k:          i("es_top_k", 40),
+        min_p:          f("es_min_p", 0.05),
+        repeat_penalty: f("es_repeat_penalty", 1.1),
+        repeat_last_n:  i("es_repeat_last_n", 64),
+        seed:           UInt32(truncatingIfNeeded: d.object(forKey: "es_seed") as? Int ?? 0)
+    )
 }

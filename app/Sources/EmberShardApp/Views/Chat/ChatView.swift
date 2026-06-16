@@ -14,7 +14,6 @@ struct ChatView: View {
     @State private var generationTask: Task<Void, Never>?
     @State private var isLoadingModel = false
     @State private var showScrollDown = false
-    @AppStorage("es_agent_mode") private var agentMode = false
     @State private var nativeNeedsReplay = false   // force full KV replay next turn
 
     private var chat: Chat? { chatStore.chat(id: chatId) }
@@ -23,12 +22,7 @@ struct ChatView: View {
         chat?.messages.sorted { $0.timestamp < $1.timestamp } ?? []
     }
 
-    private static let warmupMessages = [
-        "Warming up the engine...",
-        "Loading model into Metal...",
-        "Firing up the cores...",
-        "Waking up the silicon...",
-    ]
+    private static let warmupMessages = EngineUI.warmupMessages
 
     private var logoImage: NSImage? {
         guard let url = Bundle.module.url(forResource: "logo", withExtension: "svg"),
@@ -56,6 +50,14 @@ struct ChatView: View {
     }
 
     var body: some View {
+        if chat?.kind == .compare {
+            CompareChatView(chatId: chatId)
+        } else {
+            standardBody
+        }
+    }
+
+    private var standardBody: some View {
         VStack(spacing: 0) {
             if messages.isEmpty {
                 Spacer()
@@ -116,6 +118,7 @@ struct ChatView: View {
                 chatInputView   // full width once the conversation has started
             }
         }
+        .frame(maxWidth: .infinity, maxHeight: .infinity)   // fill so the bg is uniform
         .background(Color(NSColor.windowBackgroundColor))
     }
 
@@ -125,27 +128,26 @@ struct ChatView: View {
             isGenerating: appState.isGenerating,
             models: modelStore.compatibleModels,
             activeModelPath: modelStore.activeModelPath,
-            agentMode: agentMode,
             skills: skillsStore.skills,
             activeSkillId: chat?.skillId,
             onModelChange: { model in modelStore.setActive(model) },
-            onAgentToggle: { agentMode.toggle() },
             onSkillChange: { skillId in
                 guard var c = chat else { return }
                 c.skillId = skillId
                 chatStore.updateChat(c)
             },
             onSend: sendOrOrchestrate,
-            onCancel: cancelGeneration
+            onCancel: cancelGeneration,
+            kindBadge: chat?.kind == .agent ? "Agentic" : nil
         )
     }
 
     // MARK: - Routing
 
     private func sendOrOrchestrate() {
-        // Direct chat always runs on our native engine (es_gx). Agent mode runs
-        // the planner→executor pipeline; trivial greetings stay a direct reply.
-        if agentMode && !isTrivialGreeting(inputText) {
+        // Route by the chat's kind chosen at creation. Agentic chats run the
+        // planner→executor pipeline (trivial greetings stay a quick direct reply).
+        if chat?.kind == .agent && !isTrivialGreeting(inputText) {
             orchestrateMessage()
         } else {
             sendMessageNative()
@@ -245,7 +247,7 @@ struct ChatView: View {
                 finishGeneration(msgId: msgId, tokenCount: tokenCount)
                 // Set title and icon for new chats
                 if chat?.title == "New chat" {
-                    setHeuristicTitle(from: text)
+                    generateTitleNative(from: text)
                 }
             }
         }
@@ -293,7 +295,21 @@ struct ChatView: View {
             do {
                 // One model resident at a time: drop the agent (llama.cpp) engine.
                 await EngineService.shared.unload()
+                let willLoad = await NativeEngine.shared.needsReload(for: path)
+                if willLoad {
+                    await MainActor.run {
+                        isLoadingModel = true
+                        chatStore.setAgentStage(msgId: msgId, inChatId: chatId,
+                                                stageName: Self.warmupMessages.randomElement())
+                    }
+                }
                 let ok = await NativeEngine.shared.ensureLoaded(path: path, nCtx: ctxSize, kvQuant: kvQuant)
+                if willLoad {
+                    await MainActor.run {
+                        isLoadingModel = false
+                        chatStore.setAgentStage(msgId: msgId, inChatId: chatId, stageName: nil)
+                    }
+                }
                 guard ok else { throw EngineError.modelLoadFailed }
                 let stream = await NativeEngine.shared.send(chat: cid, system: system,
                                                             history: history, user: userText,
@@ -314,7 +330,7 @@ struct ChatView: View {
             }
             await MainActor.run {
                 finishGeneration(msgId: msgId, tokenCount: tokenCount)
-                if chat?.title == "New chat" { setHeuristicTitle(from: userText) }
+                if chat?.title == "New chat" { generateTitleNative(from: userText) }
             }
         }
     }
@@ -335,14 +351,43 @@ struct ChatView: View {
         )
     }
 
-    // Title without an LLM call (the native KV is live and must not be clobbered).
-    private func setHeuristicTitle(from userMessage: String) {
-        let words = userMessage.split(whereSeparator: { $0 == " " || $0 == "\n" })
-        let title = words.prefix(6).joined(separator: " ")
-        guard !title.isEmpty else { return }
-        let icon = IconCatalog.keywordIcon(for: userMessage) ?? IconCatalog.fallback
-        chatStore.setChatTitle(id: chatId, title: String(title.prefix(60)))
-        chatStore.setChatIcon(id: chatId, icon: icon)
+    // Topic-based title + icon from the first user message. Uses the model once
+    // (which clobbers the chat KV → next turn re-prefills automatically). Falls
+    // back to a keyword heuristic if parsing fails.
+    private func generateTitleNative(from userMessage: String) {
+        let cid = chatId
+        let sys = """
+        Respond ONLY in this exact format, nothing else:
+        ICON: <name>
+        TITLE: <short title, max 6 words>
+
+        Pick ICON verbatim from this list:
+        \(IconCatalog.promptList)
+        """
+        Task {
+            let out = await NativeEngine.shared.complete(system: sys, user: userMessage, maxTokens: 28)
+            var rawIcon = "", title = ""
+            for line in out.components(separatedBy: .newlines) {
+                let t = line.trimmingCharacters(in: .whitespaces)
+                if t.lowercased().hasPrefix("icon:") {
+                    rawIcon = String(t.dropFirst(5)).trimmingCharacters(in: .whitespaces)
+                } else if t.lowercased().hasPrefix("title:") {
+                    title = String(t.dropFirst(6)).trimmingCharacters(in: .whitespaces)
+                        .replacingOccurrences(of: "\"", with: "")
+                }
+            }
+            if title.isEmpty {
+                title = userMessage.split(whereSeparator: { $0 == " " || $0 == "\n" })
+                    .prefix(6).joined(separator: " ")
+            }
+            let finalTitle = String(title.prefix(60))
+            guard !finalTitle.isEmpty else { return }
+            await MainActor.run {
+                let icon = IconCatalog.resolve(rawIcon: rawIcon, title: finalTitle)
+                chatStore.setChatTitle(id: cid, title: finalTitle)
+                chatStore.setChatIcon(id: cid, icon: icon)
+            }
+        }
     }
 
     // MARK: - Agent (Planner -> Executor -> Critic)
@@ -426,11 +471,19 @@ struct ChatView: View {
 
             await MainActor.run {
                 finishGeneration(msgId: msgId, tokenCount: answerTokens)
-                if chat?.title == "New chat" {
-                    setHeuristicTitle(from: text)
-                }
+                // Agentic chats keep a fixed, recognizable icon (like compare).
+                if chat?.title == "New chat" { setFixedTitle(from: text, icon: "wand.and.stars") }
             }
         }
+    }
+
+    // Fixed icon + short title from the first message (no LLM call).
+    private func setFixedTitle(from msg: String, icon: String) {
+        let title = msg.split(whereSeparator: { $0 == " " || $0 == "\n" })
+            .prefix(6).joined(separator: " ")
+        guard !title.isEmpty else { return }
+        chatStore.setChatTitle(id: chatId, title: String(title.prefix(60)))
+        chatStore.setChatIcon(id: chatId, icon: icon)
     }
 
     // MARK: - Title generation
@@ -476,11 +529,10 @@ struct ChatView: View {
     // MARK: - Helpers
 
     private func finishGeneration(msgId: UUID, tokenCount: Int = 0) {
-        Task { @EngineActor in
-            let engine = EngineService.shared
-            let ctxUsed = engine.contextUsed
-            let ctxMax  = engine.contextMax
-            let frac = ctxMax > 0 ? Double(ctxUsed) / Double(ctxMax) : 0
+        Task { @NativeEngineActor in
+            let used = NativeEngine.shared.contextUsed
+            let cap  = NativeEngine.shared.contextMax
+            let frac = cap > 0 ? Double(used) / Double(cap) : 0
             await MainActor.run {
                 chatStore.finishMessage(id: msgId, inChatId: chatId,
                                         tokenCount: tokenCount, contextFraction: frac)
@@ -577,9 +629,9 @@ struct ChatView: View {
 
 // MARK: - Helpers
 
-private extension Double {
+extension Double {
     func nonZeroOr(_ fallback: Double) -> Double { self == 0 ? fallback : self }
 }
-private extension Int {
+extension Int {
     func nonZeroOr(_ fallback: Int) -> Int { self == 0 ? fallback : self }
 }

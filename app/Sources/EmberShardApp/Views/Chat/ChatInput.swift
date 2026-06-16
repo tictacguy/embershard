@@ -5,16 +5,18 @@ struct ChatInputView: View {
     let isGenerating: Bool
     let models: [LocalModel]
     let activeModelPath: String
-    let agentMode: Bool
     let skills: [Skill]
     let activeSkillId: UUID?
     let onModelChange: (LocalModel) -> Void
-    let onAgentToggle: () -> Void
     let onSkillChange: (UUID?) -> Void
     let onSend: () -> Void
     let onCancel: () -> Void
+    var kindBadge: String? = nil   // "Agentic" chip shown for agent chats
+    var showModelPicker: Bool = true   // hidden in Arena (each column is its own model)
 
-    @FocusState private var focused: Bool
+    @EnvironmentObject var appState: AppState
+    @State private var focused: Bool = false
+    @State private var editorHeight: CGFloat = 38
 
     private var activeModelName: String {
         models.first { $0.path == activeModelPath }?.name ?? "No model"
@@ -37,44 +39,49 @@ struct ChatInputView: View {
     var body: some View {
         VStack(spacing: 0) {
             VStack(spacing: 0) {
-                // Text area (min 2 lines)
-                TextField("Message...", text: $text, axis: .vertical)
-                    .textFieldStyle(.plain)
-                    .font(.body)
-                    .focused($focused)
-                    .lineLimit(2...8)
-                    .padding(.horizontal, 14)
-                    .padding(.top, 12)
-                    .padding(.bottom, 8)
-                    .onSubmit {
-                        if !NSEvent.modifierFlags.contains(.shift) {
-                            onSend()
-                        }
+                // Text area (Enter = send, Shift+Enter = newline)
+                ZStack(alignment: .topLeading) {
+                    if text.isEmpty {
+                        Text("Message...")
+                            .foregroundStyle(.tertiary)
+                            .padding(.horizontal, 14)
+                            .padding(.top, 12)
+                            .allowsHitTesting(false)
                     }
+                    ChatTextEditor(text: $text, height: $editorHeight, isFocused: $focused,
+                                   onSubmit: { if canSend { onSend() } },
+                                   minHeight: 38, maxHeight: 170)
+                        .frame(height: editorHeight)
+                        .padding(.horizontal, 14)
+                        .padding(.top, 8)
+                        .padding(.bottom, 4)
+                }
 
                 // Bottom toolbar
                 HStack(spacing: 8) {
                     // Model selector
-                    Menu {
-                        ForEach(models) { model in
-                            Button(model.name) { onModelChange(model) }
+                    if showModelPicker {
+                        Menu {
+                            ForEach(models) { model in
+                                Button(model.name) { onModelChange(model) }
+                            }
+                        } label: {
+                            HStack(spacing: 5) {
+                                ProviderIconView(modelName: activeModelName, size: 14)
+                                Text(activeModelName)
+                                    .font(.subheadline)
+                                    .lineLimit(1)
+                                Image(systemName: "chevron.up.chevron.down")
+                                    .font(.system(size: 8, weight: .medium))
+                                    .foregroundStyle(.tertiary)
+                            }
+                            .padding(.horizontal, 8)
+                            .padding(.vertical, 6)
+                            .background(Color.primary.opacity(0.03), in: RoundedRectangle(cornerRadius: 7))
                         }
-                    } label: {
-                        HStack(spacing: 5) {
-                            ProviderIconView(modelName: activeModelName, size: 14)
-                            Text(activeModelName)
-                                .font(.subheadline)
-                                .lineLimit(1)
-                            Image(systemName: "chevron.up.chevron.down")
-                                .font(.system(size: 8, weight: .medium))
-                                .foregroundStyle(.tertiary)
-                        }
-                        .padding(.horizontal, 8)
-                        .padding(.vertical, 6)
-                        .background(Color.primary.opacity(0.03), in: RoundedRectangle(cornerRadius: 7))
+                        .menuStyle(.button)
+                        .buttonStyle(.plain)
                     }
-                    .menuStyle(.button)
-                    .buttonStyle(.plain)
 
                     // Skill selector
                     Menu {
@@ -105,24 +112,16 @@ struct ChatInputView: View {
                     .menuStyle(.button)
                     .buttonStyle(.plain)
 
-                    // Agent toggle
-                    Button { onAgentToggle() } label: {
+                    // Static chat-kind chip (agentic chats)
+                    if let badge = kindBadge {
                         HStack(spacing: 5) {
-                            Image(systemName: "brain")
-                                .font(.caption)
-                            Text("Agent")
-                                .font(.subheadline)
+                            Image(systemName: "wand.and.stars").font(.caption)
+                            Text(badge).font(.subheadline)
                         }
-                        .padding(.horizontal, 8)
-                        .padding(.vertical, 6)
-                        .background(
-                            agentMode ? Color.accentColor.opacity(0.12) : Color.primary.opacity(0.03),
-                            in: RoundedRectangle(cornerRadius: 7)
-                        )
-                        .foregroundStyle(agentMode ? Color.accentColor : .secondary)
+                        .padding(.horizontal, 8).padding(.vertical, 6)
+                        .background(appState.accentColor.opacity(0.12), in: RoundedRectangle(cornerRadius: 7))
+                        .foregroundStyle(appState.accentColor)
                     }
-                    .buttonStyle(.plain)
-                    .help("Multi-agent pipeline")
 
                     Spacer()
 
@@ -135,7 +134,7 @@ struct ChatInputView: View {
                             .frame(width: 28, height: 28)
                             .foregroundStyle(canSend ? Color.white : Color.secondary)
                             .background(
-                                canSend ? Color.accentColor : Color.secondary.opacity(0.1),
+                                canSend ? appState.accentColor : Color.secondary.opacity(0.1),
                                 in: Circle()
                             )
                     }
@@ -150,7 +149,7 @@ struct ChatInputView: View {
                          in: RoundedRectangle(cornerRadius: 16))
             .overlay(
                 RoundedRectangle(cornerRadius: 16)
-                    .stroke(focused ? Color.accentColor.opacity(0.4) : Color(NSColor.separatorColor).opacity(0.5),
+                    .stroke(focused ? appState.accentColor.opacity(0.4) : Color(NSColor.separatorColor).opacity(0.5),
                             lineWidth: focused ? 2 : 1)
             )
             .shadow(color: .black.opacity(0.03), radius: 3, y: 1)
@@ -163,10 +162,92 @@ struct ChatInputView: View {
         .padding(.horizontal, 16)
         .padding(.top, 8)
         .padding(.bottom, 6)
-        .onAppear { focused = true }
     }
 
     private var canSend: Bool {
         isGenerating || !text.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty
+    }
+}
+
+// AppKit-backed multiline editor: Enter sends, Shift+Enter inserts a newline.
+// Auto-grows between minHeight and maxHeight, then scrolls.
+struct ChatTextEditor: NSViewRepresentable {
+    @Binding var text: String
+    @Binding var height: CGFloat
+    @Binding var isFocused: Bool
+    var onSubmit: () -> Void
+    let minHeight: CGFloat
+    let maxHeight: CGFloat
+
+    func makeCoordinator() -> Coordinator { Coordinator(self) }
+
+    func makeNSView(context: Context) -> NSScrollView {
+        let scroll = NSTextView.scrollableTextView()
+        scroll.drawsBackground = false
+        scroll.hasVerticalScroller = true
+        scroll.autohidesScrollers = true
+        guard let tv = scroll.documentView as? NSTextView else { return scroll }
+        tv.delegate = context.coordinator
+        tv.isRichText = false
+        tv.allowsUndo = true
+        tv.font = .systemFont(ofSize: NSFont.systemFontSize + 1)
+        tv.drawsBackground = false
+        tv.textContainerInset = NSSize(width: 0, height: 4)
+        tv.textContainer?.lineFragmentPadding = 0
+        tv.isAutomaticQuoteSubstitutionEnabled = false
+        tv.isAutomaticDashSubstitutionEnabled = false
+        tv.textContainer?.widthTracksTextView = true
+        context.coordinator.textView = tv
+        DispatchQueue.main.async { tv.window?.makeFirstResponder(tv) }
+        return scroll
+    }
+
+    func updateNSView(_ scroll: NSScrollView, context: Context) {
+        context.coordinator.parent = self
+        guard let tv = scroll.documentView as? NSTextView else { return }
+        if tv.string != text { tv.string = text }
+        context.coordinator.recomputeHeight()
+    }
+
+    final class Coordinator: NSObject, NSTextViewDelegate {
+        var parent: ChatTextEditor
+        weak var textView: NSTextView?
+        init(_ p: ChatTextEditor) { parent = p }
+
+        func recomputeHeight() {
+            guard let tv = textView, let lm = tv.layoutManager,
+                  let tc = tv.textContainer else { return }
+            lm.ensureLayout(for: tc)
+            let used = lm.usedRect(for: tc).height + tv.textContainerInset.height * 2
+            let clamped = min(max(used, parent.minHeight), parent.maxHeight)
+            if abs(clamped - parent.height) > 0.5 {
+                DispatchQueue.main.async { self.parent.height = clamped }
+            }
+        }
+
+        func textDidChange(_ notification: Notification) {
+            guard let tv = notification.object as? NSTextView else { return }
+            parent.text = tv.string
+            recomputeHeight()
+        }
+
+        func textDidBeginEditing(_ notification: Notification) {
+            DispatchQueue.main.async { self.parent.isFocused = true }
+        }
+        func textDidEndEditing(_ notification: Notification) {
+            DispatchQueue.main.async { self.parent.isFocused = false }
+        }
+
+        func textView(_ tv: NSTextView, doCommandBy sel: Selector) -> Bool {
+            if sel == #selector(NSResponder.insertNewline(_:)) {
+                if NSEvent.modifierFlags.contains(.shift) {
+                    tv.insertNewlineIgnoringFieldEditor(nil)
+                } else {
+                    parent.onSubmit()
+                }
+                return true
+            }
+            return false
+        }
     }
 }

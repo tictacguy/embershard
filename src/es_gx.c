@@ -615,6 +615,24 @@ int es_gx_ingest(es_gx_model *m, const char *text, bool add_bos, bool parse_spec
     return logits ? 0 : -1;
 }
 
+// Byte length of the longest complete UTF-8 prefix of buf[0..n).
+// A multi-byte codepoint may be split across tokens (byte-level BPE), so we
+// only ever hand the callback whole, valid UTF-8 — otherwise the host decoder
+// turns the partial bytes into U+FFFD (the "" garbage).
+static int gx_utf8_complete(const unsigned char *b, int n) {
+    int i = 0;
+    while (i < n) {
+        unsigned char c = b[i];
+        int len = (c < 0x80) ? 1
+                : ((c >> 5) == 0x6) ? 2
+                : ((c >> 4) == 0xE) ? 3
+                : ((c >> 3) == 0x1E) ? 4 : 1;
+        if (i + len > n) break;   // incomplete trailing sequence: hold it back
+        i += len;
+    }
+    return i;
+}
+
 int es_gx_generate_stream(es_gx_model *m, int max_tokens, es_gx_token_cb cb, void *ud) {
     if (!m || !m->tok) return -1;
     if (m->samp.seed) g_rng = (uint64_t)m->samp.seed * 2654435761u + 1;
@@ -622,16 +640,30 @@ int es_gx_generate_stream(es_gx_model *m, int max_tokens, es_gx_token_cb cb, voi
     const float *logits = m->logits;   // set by the last ingest/eval
     int produced = 0;
     char piece[64];
+    char pend[256]; int plen = 0;      // buffer for split UTF-8 sequences
     for (int g = 0; g < max_tokens && m->n_past < m->n_ctx; g++) {
         if (atomic_load(&m->cancel)) break;
         int id = gx_sample(m, logits);
         if (es_gx_token_is_eog(m, id)) break;
         int k = es_tok_decode(m->tok, id, piece, sizeof(piece));
-        if (k > 0 && cb) cb(piece, ud);
+        if (k > 0 && cb) {
+            // flush first if the new bytes wouldn't fit (keeps pend bounded)
+            if (plen + k > (int)sizeof(pend) - 1) {
+                pend[plen] = 0; cb(pend, ud); plen = 0;
+            }
+            memcpy(pend + plen, piece, k); plen += k;
+            int good = gx_utf8_complete((const unsigned char *)pend, plen);
+            if (good > 0) {
+                char saved = pend[good];
+                pend[good] = 0; cb(pend, ud); pend[good] = saved;
+                memmove(pend, pend + good, plen - good); plen -= good;
+            }
+        }
         produced++;
         logits = es_gx_eval(m, &id, 1, m->n_past);
         if (!logits) break;
     }
+    if (plen > 0 && cb) { pend[plen] = 0; cb(pend, ud); }   // flush remainder
     return produced;
 }
 

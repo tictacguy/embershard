@@ -169,7 +169,7 @@ private struct BubbleContent: View {
 
 // MARK: - MarkdownText
 
-private struct MarkdownText: View {
+struct MarkdownText: View {
     let text: String
     init(_ text: String) { self.text = text }
 
