@@ -20,13 +20,14 @@ struct Message: Codable, Identifiable {
     var tokenCount: Int = 0         // tokens generated (0 = unknown / user message)
     var contextFraction: Double = 0 // fraction of context window in use when this was generated
     var agentSteps: [AgentStep] = [] // intermediate planner/executor output (agent mode)
+    var fileResults: [String] = []   // file paths surfaced by a macOS-helper tool (reveal in Finder)
 
     // Transient — not persisted, reset on load
     var isStreaming: Bool = false
     var agentStageName: String? = nil  // "Planning…" / "Executing…" / "Reviewing…" during agent mode
 
     enum CodingKeys: String, CodingKey {
-        case id, role, content, timestamp, modelName, tokenCount, contextFraction, agentSteps
+        case id, role, content, timestamp, modelName, tokenCount, contextFraction, agentSteps, fileResults
     }
 
     init(role: String, content: String = "", modelName: String = "") {
@@ -45,12 +46,13 @@ struct Message: Codable, Identifiable {
         tokenCount     = (try? c.decode(Int.self,    forKey: .tokenCount)) ?? 0
         contextFraction = (try? c.decode(Double.self, forKey: .contextFraction)) ?? 0
         agentSteps     = (try? c.decode([AgentStep].self, forKey: .agentSteps)) ?? []
+        fileResults    = (try? c.decode([String].self, forKey: .fileResults)) ?? []
     }
 }
 
 // MARK: - Chat
 
-enum ChatKind: String, Codable { case standard, agent, compare }
+enum ChatKind: String, Codable { case standard, macos, compare }
 
 struct Chat: Codable, Identifiable {
     var id: UUID = UUID()
@@ -61,12 +63,13 @@ struct Chat: Codable, Identifiable {
     var projectId: UUID? = nil
     var skillId: UUID? = nil      // optional Skill applied to this chat
     var messages: [Message] = []
-    var kind: ChatKind = .standard          // standard | agent | compare
+    var kind: ChatKind = .standard          // standard | macos | compare
+    var agentMode: Bool = false             // planner→executor toggle (standard/arena)
     var compareModels: [String] = []        // model paths for a compare chat
     var compareTurns: [CompareTurn] = []    // persisted Q&A turns for an arena chat
 
     enum CodingKeys: String, CodingKey {
-        case id, title, icon, createdAt, modelPath, projectId, skillId, messages, kind, compareModels, compareTurns
+        case id, title, icon, createdAt, modelPath, projectId, skillId, messages, kind, agentMode, compareModels, compareTurns
     }
 
     init(modelPath: String = "", projectId: UUID? = nil, skillId: UUID? = nil,
@@ -89,6 +92,7 @@ struct Chat: Codable, Identifiable {
         skillId       = try? c.decode(UUID.self, forKey: .skillId)
         messages      = (try? c.decode([Message].self, forKey: .messages)) ?? []
         kind          = (try? c.decode(ChatKind.self, forKey: .kind)) ?? .standard
+        agentMode     = (try? c.decode(Bool.self, forKey: .agentMode)) ?? false
         compareModels = (try? c.decode([String].self, forKey: .compareModels)) ?? []
         compareTurns  = (try? c.decode([CompareTurn].self, forKey: .compareTurns)) ?? []
     }
@@ -108,10 +112,23 @@ struct Project: Codable, Identifiable {
     var name: String
     var createdAt: Date = Date()
     var systemPrompt: String = ""
+    var icon: String = "folder"
 
-    init(name: String, systemPrompt: String = "") {
+    enum CodingKeys: String, CodingKey { case id, name, createdAt, systemPrompt, icon }
+
+    init(name: String, systemPrompt: String = "", icon: String = "folder") {
         self.name = name
         self.systemPrompt = systemPrompt
+        self.icon = icon
+    }
+
+    init(from d: Decoder) throws {
+        let c = try d.container(keyedBy: CodingKeys.self)
+        id           = (try? c.decode(UUID.self, forKey: .id)) ?? UUID()
+        name         = (try? c.decode(String.self, forKey: .name)) ?? "Project"
+        createdAt    = (try? c.decode(Date.self, forKey: .createdAt)) ?? Date()
+        systemPrompt = (try? c.decode(String.self, forKey: .systemPrompt)) ?? ""
+        icon         = (try? c.decode(String.self, forKey: .icon)) ?? "folder"
     }
 }
 
@@ -434,6 +451,12 @@ final class ChatStore: ObservableObject {
         save()
     }
 
+    func updateProjectIcon(id: UUID, icon: String) {
+        guard let idx = projects.firstIndex(where: { $0.id == id }) else { return }
+        projects[idx].icon = icon
+        save()
+    }
+
     // MARK: Chat CRUD
 
     func addChat(_ chat: Chat) {
@@ -515,6 +538,22 @@ final class ChatStore: ObservableObject {
               !chats[cidx].messages[midx].agentSteps.isEmpty else { return }
         let last = chats[cidx].messages[midx].agentSteps.count - 1
         chats[cidx].messages[midx].agentSteps[last].content += piece
+    }
+
+    // Replace the most recent agent step's body (status line, vs appending tokens).
+    func setAgentStepContent(msgId: UUID, inChatId chatId: UUID, content: String) {
+        guard let cidx = chats.firstIndex(where: { $0.id == chatId }),
+              let midx = chats[cidx].messages.firstIndex(where: { $0.id == msgId }),
+              !chats[cidx].messages[midx].agentSteps.isEmpty else { return }
+        let last = chats[cidx].messages[midx].agentSteps.count - 1
+        chats[cidx].messages[midx].agentSteps[last].content = content
+    }
+
+    // Attach file paths a macOS-helper tool surfaced (for reveal-in-Finder rows).
+    func setMessageFileResults(msgId: UUID, inChatId chatId: UUID, paths: [String]) {
+        guard let cidx = chats.firstIndex(where: { $0.id == chatId }),
+              let midx = chats[cidx].messages.firstIndex(where: { $0.id == msgId }) else { return }
+        chats[cidx].messages[midx].fileResults = paths
     }
 
     func finishMessage(id msgId: UUID, inChatId chatId: UUID,

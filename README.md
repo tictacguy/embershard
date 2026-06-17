@@ -4,7 +4,7 @@
 
 ### [⬇️ Download the latest .dmg](https://github.com/tictacguy/embershard/releases/latest)
 
-**Latest release:** v0.1.1
+**Latest release:** v0.1.2
 
 Grab the signed `.dmg` from the latest release, drag Embershard into
 Applications, and right-click → Open the first time (you'll need to approve it's opening by going to System Settings->Privacy and Security->Scroll down until "Security" section and click "Open Anyway"). No clone, no toolchain. Apple Silicon, macOS 14 or newer.
@@ -147,15 +147,38 @@ swift build -c release      # development build
 ./make_dmg.sh               # signed .app + drag-to-Applications .dmg
 ```
 
-Inside: tabbed chats and projects, per-chat skills, three chat modes when you
-start a new one — **Standard**, **Agentic** (planner → executor, for multi-step
-tasks), and **Arena** (ask up to four models at once and watch them answer side
-by side, concurrently) — a HuggingFace browser restricted to engine-compatible
-official GGUFs with the publisher shown, and an inference panel for context size,
-max tokens and the full sampler.
+Inside: tabbed chats, projects (each with its own icon and system prompt) you can
+organize chats into, per-chat skills, multi-select delete, and three chat modes
+when you start a new one:
+
+- **Standard** — one model, one conversation. Flip the **Agent** toggle for a
+  planner → executor pass on multi-step questions.
+- **Pomme** *(Beta)* — a macOS helper that operates on your files. See below.
+- **Arena** — ask up to four models the same thing and watch them answer side by
+  side, concurrently (two at a time under 32 GB of unified memory, four with more).
+
+Plus a HuggingFace browser restricted to engine-compatible official GGUFs with the
+publisher shown, and an inference panel for context size, max tokens and the full
+sampler.
 
 First launch on another Mac (ad-hoc signed): right-click → Open → Open, or
 `xattr -dr com.apple.quarantine /path/to/Embershard.app`.
+
+## Pomme — the macOS helper
+
+Because this is a Mac-only app, Pomme lets the local model actually *do* things on
+your machine. You describe one task in plain language and the model's only job is
+to pick the right tool; everything else — the filesystem work, the summaries — is
+plain Swift, so it stays predictable and doesn't hallucinate results. Anything that
+changes your files is shown as a **preview you accept, decline, or adjust** (à la
+Claude Code) before it runs, and deletes only ever go to the **Trash**.
+
+The tools: find files by name, biggest files (in a folder or across the whole Mac),
+where your space is going, recently-changed files, a heuristic threat scan, the
+heaviest running apps, tidy the Desktop or a folder by type, organize by date, find
+duplicates, clean old Downloads, move/rename, create a folder, and quit an app. Read-
+only tools run immediately; the rest ask first. It's deliberately one tool per turn —
+ask again for the next step — which keeps it stable on small local models.
 
 ## Picking models
 

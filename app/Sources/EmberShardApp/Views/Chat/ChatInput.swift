@@ -13,6 +13,14 @@ struct ChatInputView: View {
     let onCancel: () -> Void
     var kindBadge: String? = nil   // "Agentic" chip shown for agent chats
     var showModelPicker: Bool = true   // hidden in Arena (each column is its own model)
+    var showSkillPicker: Bool = true   // hidden in the macOS Helper
+    // Optional toggle button (planner→executor "Agent", or the helper's "Auto" mode).
+    var toggleActive: Bool = false
+    var toggleLabel: String = "Agent"
+    var toggleIcon: String = "wand.and.stars"
+    var onToggle: (() -> Void)? = nil
+    var onShowTools: (() -> Void)? = nil   // macOS Helper: list available tools
+    var onAttach: (() -> Void)? = nil      // macOS Helper: link a file/folder
 
     @EnvironmentObject var appState: AppState
     @State private var focused: Bool = false
@@ -84,33 +92,35 @@ struct ChatInputView: View {
                     }
 
                     // Skill selector
-                    Menu {
-                        Button("No skill") { onSkillChange(nil) }
-                        Divider()
-                        ForEach(skills) { skill in
-                            Button { onSkillChange(skill.id) } label: {
-                                Label(skill.name, systemImage: skill.icon)
+                    if showSkillPicker {
+                        Menu {
+                            Button("No skill") { onSkillChange(nil) }
+                            Divider()
+                            ForEach(skills) { skill in
+                                Button { onSkillChange(skill.id) } label: {
+                                    Label(skill.name, systemImage: skill.icon)
+                                }
                             }
+                        } label: {
+                            HStack(spacing: 5) {
+                                Image(systemName: activeSkillIcon)
+                                    .font(.caption)
+                                    .foregroundStyle(activeSkillId != nil ? .orange : .secondary)
+                                Text(activeSkillName)
+                                    .font(.subheadline)
+                                    .lineLimit(1)
+                                    .foregroundStyle(activeSkillId != nil ? .orange : .primary)
+                                Image(systemName: "chevron.up.chevron.down")
+                                    .font(.system(size: 8, weight: .medium))
+                                    .foregroundStyle(.tertiary)
+                            }
+                            .padding(.horizontal, 8)
+                            .padding(.vertical, 6)
+                            .background(Color.primary.opacity(0.03), in: RoundedRectangle(cornerRadius: 7))
                         }
-                    } label: {
-                        HStack(spacing: 5) {
-                            Image(systemName: activeSkillIcon)
-                                .font(.caption)
-                                .foregroundStyle(activeSkillId != nil ? .orange : .secondary)
-                            Text(activeSkillName)
-                                .font(.subheadline)
-                                .lineLimit(1)
-                                .foregroundStyle(activeSkillId != nil ? .orange : .primary)
-                            Image(systemName: "chevron.up.chevron.down")
-                                .font(.system(size: 8, weight: .medium))
-                                .foregroundStyle(.tertiary)
-                        }
-                        .padding(.horizontal, 8)
-                        .padding(.vertical, 6)
-                        .background(Color.primary.opacity(0.03), in: RoundedRectangle(cornerRadius: 7))
+                        .menuStyle(.button)
+                        .buttonStyle(.plain)
                     }
-                    .menuStyle(.button)
-                    .buttonStyle(.plain)
 
                     // Static chat-kind chip (agentic chats)
                     if let badge = kindBadge {
@@ -121,6 +131,50 @@ struct ChatInputView: View {
                         .padding(.horizontal, 8).padding(.vertical, 6)
                         .background(appState.accentColor.opacity(0.12), in: RoundedRectangle(cornerRadius: 7))
                         .foregroundStyle(appState.accentColor)
+                    }
+
+                    // Toggle button (Agent pipeline, or helper Auto-mode)
+                    if let onToggle {
+                        Button(action: onToggle) {
+                            HStack(spacing: 5) {
+                                Image(systemName: toggleIcon).font(.caption)
+                                Text(toggleLabel).font(.subheadline)
+                            }
+                            .padding(.horizontal, 8).padding(.vertical, 6)
+                            .background(toggleActive ? appState.accentColor.opacity(0.15) : Color.primary.opacity(0.03),
+                                        in: RoundedRectangle(cornerRadius: 7))
+                            .foregroundStyle(toggleActive ? appState.accentColor : .secondary)
+                        }
+                        .buttonStyle(.plain)
+                    }
+
+                    // Attach a file/folder (macOS Helper)
+                    if let onAttach {
+                        Button(action: onAttach) {
+                            HStack(spacing: 5) {
+                                Image(systemName: "paperclip").font(.caption)
+                                Text("Attach").font(.subheadline)
+                            }
+                            .padding(.horizontal, 8).padding(.vertical, 6)
+                            .background(Color.primary.opacity(0.03), in: RoundedRectangle(cornerRadius: 7))
+                            .foregroundStyle(.secondary)
+                        }
+                        .buttonStyle(.plain)
+                        .help("Link a file or folder")
+                    }
+
+                    // Tools list (macOS Helper)
+                    if let onShowTools {
+                        Button(action: onShowTools) {
+                            HStack(spacing: 5) {
+                                Image(systemName: "wrench.and.screwdriver").font(.caption)
+                                Text("Tools").font(.subheadline)
+                            }
+                            .padding(.horizontal, 8).padding(.vertical, 6)
+                            .background(Color.primary.opacity(0.03), in: RoundedRectangle(cornerRadius: 7))
+                            .foregroundStyle(.secondary)
+                        }
+                        .buttonStyle(.plain)
                     }
 
                     Spacer()

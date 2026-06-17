@@ -93,12 +93,12 @@ final class HuggingFaceService: ObservableObject {
               file: "Mistral-7B-Instruct-v0.2-Q4_K_M.gguf", size: 4.4, quant: "Q4_K_M", ram: 16, dl: 80000, likes: 300),
         entry("bartowski/Llama-2-7b-chat-hf-GGUF", name: "Llama 2 7B Chat",
               file: "Llama-2-7b-chat-hf-Q4_K_M.gguf", size: 4.1, quant: "Q4_K_M", ram: 16, dl: 60000, likes: 250),
-        entry("Qwen/Qwen2.5-14B-Instruct-GGUF", name: "Qwen 2.5 14B Instruct",
-              file: "qwen2.5-14b-instruct-q4_k_m.gguf", size: 9.0, quant: "Q4_K_M", ram: 16, dl: 70000, likes: 300),
+        entry("bartowski/Qwen2.5-14B-Instruct-GGUF", name: "Qwen 2.5 14B Instruct",
+              file: "Qwen2.5-14B-Instruct-Q4_K_M.gguf", size: 9.0, quant: "Q4_K_M", ram: 16, dl: 70000, likes: 300),
 
         // ── 32 GB+ RAM ───────────────────────────────────────────────────────
-        entry("Qwen/Qwen2.5-32B-Instruct-GGUF", name: "Qwen 2.5 32B Instruct",
-              file: "qwen2.5-32b-instruct-q4_k_m.gguf", size: 19.8, quant: "Q4_K_M", ram: 32, dl: 30000, likes: 200),
+        entry("bartowski/Qwen2.5-32B-Instruct-GGUF", name: "Qwen 2.5 32B Instruct",
+              file: "Qwen2.5-32B-Instruct-Q4_K_M.gguf", size: 19.8, quant: "Q4_K_M", ram: 32, dl: 30000, likes: 200),
     ]
 
     private static func entry(_ repo: String, name: String, file: String,
@@ -157,8 +157,11 @@ final class HuggingFaceService: ObservableObject {
             let preferredQuants = ["Q4_K_M", "Q5_K_M", "Q4_K_S", "Q8_0"]
             let ggufFiles = files.filter { f in
                 guard f.filename.hasSuffix(".gguf") else { return false }
-                // Skip split files
-                guard !f.filename.contains("-00001-of-") && !f.filename.contains("-00002-of-") else { return false }
+                // Skip all sharded files (any part marker)
+                let shardPattern = try? NSRegularExpression(pattern: "-\\d{5}-of-\\d{5}")
+                if let _ = shardPattern?.firstMatch(in: f.filename, range: NSRange(f.filename.startIndex..., in: f.filename)) {
+                    return false
+                }
                 let upper = f.filename.uppercased()
                 return preferredQuants.contains { upper.contains($0) }
             }

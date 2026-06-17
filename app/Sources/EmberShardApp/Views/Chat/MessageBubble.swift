@@ -352,11 +352,9 @@ private struct CodeBlockView: View {
         VStack(alignment: .leading, spacing: 0) {
             // Header with language and copy button
             HStack {
-                if !language.isEmpty {
-                    Text(language)
-                        .font(.caption.weight(.medium))
-                        .foregroundStyle(.secondary)
-                }
+                Text(language.isEmpty ? "bash" : language)
+                    .font(.caption.weight(.medium))
+                    .foregroundStyle(.secondary)
                 Spacer()
                 Button {
                     NSPasteboard.general.clearContents()
@@ -392,23 +390,19 @@ private struct CodeBlockView: View {
 
 // MARK: - Agent pipeline steps
 
-private struct AgentStepsView: View {
+struct AgentStepsView: View {
     let steps: [AgentStep]
     var activeStage: String? = nil   // e.g. "Executing..." while that stage streams
 
     var body: some View {
         VStack(alignment: .leading, spacing: 4) {
-            ForEach(Array(steps.enumerated()), id: \.offset) { _, step in
-                AgentStepRow(step: step, isActive: isActive(step))
+            ForEach(Array(steps.enumerated()), id: \.offset) { idx, step in
+                // Only the last step is "active" while a stage is streaming, so
+                // repeated titles don't all expand at once.
+                AgentStepRow(step: step, isActive: activeStage != nil && idx == steps.count - 1)
             }
         }
         .frame(maxWidth: 520, alignment: .leading)
-    }
-
-    // The step whose name matches the live stage label is currently generating.
-    private func isActive(_ step: AgentStep) -> Bool {
-        guard let activeStage else { return false }
-        return activeStage.lowercased().hasPrefix(step.title.lowercased())
     }
 }
 
@@ -426,12 +420,12 @@ private struct AgentStepRow: View {
             Button {
                 withAnimation(.easeInOut(duration: 0.15)) { expanded.toggle() }
             } label: {
-                HStack(spacing: isActive ? 9 : 6) {
+                HStack(spacing: isActive ? 9 : 8) {
                     Image(systemName: step.icon)
-                        .font(isActive ? .title3 : .caption)
-                        .frame(width: isActive ? 24 : 16)
+                        .font(isActive ? .title3 : .subheadline)
+                        .frame(width: isActive ? 24 : 20)
                     Text(isActive ? "\(step.title)…" : step.title)
-                        .font(isActive ? .headline : .caption.weight(.semibold))
+                        .font(isActive ? .headline : .subheadline.weight(.semibold))
                     if isActive {
                         ProgressView()
                             .controlSize(.small)
@@ -440,13 +434,13 @@ private struct AgentStepRow: View {
                     Spacer(minLength: 8)
                     if !isActive {
                         Image(systemName: "chevron.right")
-                            .font(.system(size: 9, weight: .semibold))
+                            .font(.system(size: 11, weight: .semibold))
                             .rotationEffect(.degrees(expanded ? 90 : 0))
                     }
                 }
                 .foregroundStyle(isActive ? .primary : .secondary)
-                .padding(.horizontal, isActive ? 14 : 10)
-                .padding(.vertical, isActive ? 11 : 6)
+                .padding(.horizontal, isActive ? 14 : 12)
+                .padding(.vertical, isActive ? 11 : 9)
                 .contentShape(Rectangle())
             }
             .buttonStyle(.plain)
@@ -475,7 +469,7 @@ private struct AgentStepRow: View {
 
 // MARK: - TypingIndicator
 
-private struct TypingIndicator: View {
+struct TypingIndicator: View {
     @State private var phase = 0
     let timer = Timer.publish(every: 0.4, on: .main, in: .common).autoconnect()
 

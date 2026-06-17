@@ -183,6 +183,33 @@ final class NativeEngine {
         return out
     }
 
+    // Streamed one-shot completion (greedy). Clobbers the live chat KV, like
+    // complete(), but yields pieces so the UI can render in real time.
+    func completeStream(system: String?, user: String, maxTokens: Int32) -> AsyncThrowingStream<String, Error> {
+        AsyncThrowingStream { continuation in
+            Task { @NativeEngineActor in
+                guard let m = self.model else { continuation.finish(throwing: EngineError.notLoaded); return }
+                self.liveChat = nil
+                es_gx_set_sampling(m, es_gx_sampling(temp: 0, top_p: 1, top_k: 0, min_p: 0,
+                                                     repeat_penalty: 1.1, repeat_last_n: 64, seed: 0))
+                let prompt = self.buildPrompt(system: system, history: [], user: user, continuation: false)
+                es_gx_reset(m)
+                guard prompt.withCString({ es_gx_ingest(m, $0, false, true) == 0 }) else {
+                    continuation.finish(throwing: EngineError.generationFailed); return
+                }
+                let box = NativeBox(continuation: continuation)
+                let ud = Unmanaged.passRetained(box).toOpaque()
+                let cb: @convention(c) (UnsafePointer<CChar>?, UnsafeMutableRawPointer?) -> Void = { piece, ud in
+                    guard let piece, let ud else { return }
+                    Unmanaged<NativeBox>.fromOpaque(ud).takeUnretainedValue().continuation.yield(String(cString: piece))
+                }
+                _ = es_gx_generate_stream(m, maxTokens, cb, ud)
+                Unmanaged<NativeBox>.fromOpaque(ud).release()
+                continuation.finish()
+            }
+        }
+    }
+
     // ── chat templating (llama3 / qwen2 / spm) ───────────────────────────────
     private func buildPrompt(system: String?, history: [NativeTurn], user: String,
                              continuation: Bool) -> String {
