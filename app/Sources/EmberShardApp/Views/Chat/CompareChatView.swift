@@ -13,7 +13,7 @@ struct CompareChatView: View {
     @EnvironmentObject var appState: AppState
     @EnvironmentObject var skillsStore: SkillsStore
 
-    @AppStorage("es_show_token_info") private var showTokenInfo: Bool = false
+    @AppStorage("es_show_token_info") private var showTokenInfo: Bool = true
 
     @State private var input = ""
     @State private var turns: [CompareTurn] = []

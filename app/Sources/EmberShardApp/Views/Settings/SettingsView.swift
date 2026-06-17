@@ -51,7 +51,7 @@ struct SettingsView: View {
 
 private struct DisplaySettingsView: View {
     @AppStorage("es_appearance") private var appearance: String = "system"
-    @AppStorage("es_show_token_info") private var showTokenInfo: Bool = false
+    @AppStorage("es_show_token_info") private var showTokenInfo: Bool = true
     @EnvironmentObject var appState: AppState
 
     var body: some View {
