@@ -18,7 +18,7 @@ BUILD_DIR="$REPO_ROOT/build"
 DIST_DIR="$SCRIPT_DIR/dist"
 APP_NAME="Embershard"
 APP="$DIST_DIR/$APP_NAME.app"
-VERSION="0.1.4"
+VERSION="0.1.5"
 VOL_NAME="$APP_NAME $VERSION"
 NCPU="$(sysctl -n hw.ncpu)"
 
@@ -61,6 +61,21 @@ mkdir -p "$APP/Contents/Resources"
 
 cp "$BINARY" "$APP/Contents/MacOS/$APP_NAME"
 cp "$SCRIPT_DIR/Sources/EmberShardApp/Resources/Info.plist" "$APP/Contents/"
+
+# SwiftPM resource bundle(s) — `Bundle.module` (logo.svg, ProviderIcons, …) looks
+# for these under the app's Resources. Without them the app hits a fatalError at
+# launch on any machine other than the build host. This is REQUIRED.
+shopt -s nullglob
+RES_BUNDLES=("$SCRIPT_DIR/.build/release/"*.bundle)
+shopt -u nullglob
+if [ ${#RES_BUNDLES[@]} -eq 0 ]; then
+    echo "ERROR: no SwiftPM resource bundle found in .build/release (Bundle.module would crash)." >&2
+    exit 1
+fi
+for b in "${RES_BUNDLES[@]}"; do
+    cp -R "$b" "$APP/Contents/Resources/"
+    echo "  ✓ $(basename "$b")"
+done
 
 # App icon
 ICNS="$SCRIPT_DIR/Sources/EmberShardApp/Resources/AppIcon.icns"
