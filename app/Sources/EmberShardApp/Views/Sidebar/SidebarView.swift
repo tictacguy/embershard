@@ -306,8 +306,10 @@ private struct ChatRow: View {
                 .buttonStyle(.plain)
             }
             Image(systemName: chat.icon).frame(width: 18)
+            // Fixed-width frame: in a macOS 14 List a Text without a definite
+            // width truncates to its first letter. (ChromeTab works for the same reason.)
             Text(chat.title).font(.body).lineLimit(1).truncationMode(.tail)
-            Spacer(minLength: 0)
+                .frame(maxWidth: 210, alignment: .leading)
         }
         .frame(maxWidth: .infinity, alignment: .leading)
         .contentShape(Rectangle())
@@ -359,7 +361,7 @@ private struct ProjectRow: View {
                     }
                     Image(systemName: chat.icon).frame(width: 18)
                     Text(chat.title).font(.body).lineLimit(1).truncationMode(.tail)
-                    Spacer(minLength: 0)
+                        .frame(maxWidth: 190, alignment: .leading)
                 }
                 .frame(maxWidth: .infinity, alignment: .leading)
                 .tag(chat.id)
@@ -393,6 +395,7 @@ private struct ProjectRow: View {
                 }
                 Image(systemName: project.icon).frame(width: 18)
                 Text(project.name).font(.body.weight(.medium)).lineLimit(1).truncationMode(.tail)
+                    .frame(maxWidth: 170, alignment: .leading)
                 Spacer(minLength: 0)
                 if !selectMode && hovering {
                     Button { onNewChat() } label: { Image(systemName: "plus") }
