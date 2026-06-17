@@ -4,7 +4,7 @@ struct MessageBubble: View {
     let message: Message
     var modelName: String = "Model"
     var onRegenerate: (() -> Void)? = nil
-    @AppStorage("es_show_token_info") private var showTokenInfo: Bool = false
+    @AppStorage("es_show_token_info") private var showTokenInfo: Bool = true
     @EnvironmentObject var appState: AppState
 
     var isUser: Bool { message.role == "user" }

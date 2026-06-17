@@ -22,7 +22,7 @@ struct MacHelperChatView: View {
     @State private var decisionCont: CheckedContinuation<Decision, Never>?
     @State private var showTools = false
     @State private var attachments: [URL] = []
-    @AppStorage("es_show_token_info") private var showTokenInfo: Bool = false
+    @AppStorage("es_show_token_info") private var showTokenInfo: Bool = true
 
     enum Decision { case accept, decline }
     struct PreviewInfo: Identifiable { let id = UUID(); let plan: MacActionPlan }
@@ -505,29 +505,29 @@ struct MacHelperChatView: View {
 }
 
 // Collapsed-by-default list of read-only file results (so it never feels bulky).
+// Read-only results shown as a compact table: File · Size · Created · Type · Actions.
 private struct FileResults: View {
     let paths: [String]
     let accent: Color
     @State private var expanded = false
 
-    // Size · created · kind, read live from disk (so it survives reloads).
-    static func info(for path: String) -> String {
+    private struct Meta { let size: String; let created: String; let ext: String }
+    private static func meta(for path: String) -> Meta {
         let url = URL(fileURLWithPath: path)
-        let v = try? url.resourceValues(forKeys: [.fileSizeKey, .creationDateKey, .isDirectoryKey, .totalFileAllocatedSizeKey])
-        var parts: [String] = []
-        if v?.isDirectory == true {
-            parts.append("Folder")
-        } else if let s = v?.fileSize {
-            parts.append(ByteCountFormatter.string(fromByteCount: Int64(s), countStyle: .file))
-        }
-        if let created = v?.creationDate {
-            let df = DateFormatter(); df.dateStyle = .medium; df.timeStyle = .none
-            parts.append("created \(df.string(from: created))")
-        }
-        let ext = (path as NSString).pathExtension
-        if !ext.isEmpty { parts.append(ext.uppercased()) }
-        return parts.joined(separator: " · ")
+        let v = try? url.resourceValues(forKeys: [.fileSizeKey, .creationDateKey, .isDirectoryKey])
+        let isDir = v?.isDirectory == true
+        let size = isDir ? "—" : (v?.fileSize).map { ByteCountFormatter.string(fromByteCount: Int64($0), countStyle: .file) } ?? "—"
+        var created = "—"
+        if let d = v?.creationDate { let df = DateFormatter(); df.dateStyle = .medium; df.timeStyle = .none; created = df.string(from: d) }
+        let e = (path as NSString).pathExtension
+        let ext = isDir ? "Folder" : (e.isEmpty ? "—" : e.uppercased())
+        return Meta(size: size, created: created, ext: ext)
     }
+
+    private func cell<V: View>(_ width: CGFloat?, _ align: Alignment = .leading, @ViewBuilder _ c: () -> V) -> some View {
+        c().frame(width: width, alignment: align)
+    }
+
     var body: some View {
         VStack(alignment: .leading, spacing: 0) {
             Button { withAnimation(.easeInOut(duration: 0.15)) { expanded.toggle() } } label: {
@@ -541,23 +541,46 @@ private struct FileResults: View {
             }
             .buttonStyle(.plain).foregroundStyle(.secondary)
             .padding(.horizontal, 10).padding(.vertical, 8)
+
             if expanded {
-                ForEach(Array(paths.prefix(80)), id: \.self) { path in
-                    HStack(spacing: 8) {
-                        FileIconView(path: path, size: 26)
-                        VStack(alignment: .leading, spacing: 1) {
-                            Text((path as NSString).lastPathComponent).font(.subheadline).lineLimit(1)
-                            Text(Self.info(for: path)).font(.caption2).foregroundStyle(.secondary).lineLimit(1)
-                        }
-                        Spacer()
-                        RevealInFinderButton(path: path)
-                    }
-                    .padding(.horizontal, 10).padding(.vertical, 6)
-                    Divider().opacity(0.3)
+                // Header
+                HStack(spacing: 12) {
+                    Text("File").frame(maxWidth: .infinity, alignment: .leading)
+                    cell(72, .trailing) { Text("Size") }
+                    cell(104) { Text("Created") }
+                    cell(56) { Text("Type") }
+                    cell(120, .center) { Text("Actions") }
                 }
-                if paths.count > 80 {
-                    Text("+ \(paths.count - 80) more").font(.caption).foregroundStyle(.tertiary)
-                        .padding(.horizontal, 10).padding(.vertical, 5)
+                .font(.caption2.weight(.semibold)).foregroundStyle(.tertiary)
+                .padding(.horizontal, 12).padding(.vertical, 6)
+                .background(Color.primary.opacity(0.04))
+                Divider().opacity(0.4)
+
+                ScrollView {
+                    VStack(spacing: 0) {
+                        ForEach(Array(paths.prefix(200)), id: \.self) { path in
+                            let m = Self.meta(for: path)
+                            HStack(spacing: 12) {
+                                HStack(spacing: 7) {
+                                    FileIconView(path: path, size: 20)
+                                    Text((path as NSString).lastPathComponent).lineLimit(1).truncationMode(.middle)
+                                }
+                                .frame(maxWidth: .infinity, alignment: .leading)
+                                cell(72, .trailing) { Text(m.size).monospacedDigit() }
+                                cell(104) { Text(m.created) }
+                                cell(56) { Text(m.ext) }
+                                cell(120, .center) { RevealInFinderButton(path: path) }
+                            }
+                            .font(.caption)
+                            .padding(.horizontal, 12).padding(.vertical, 5)
+                            Divider().opacity(0.25)
+                        }
+                    }
+                }
+                .frame(maxHeight: paths.count > 8 ? 280 : .infinity)
+                if paths.count > 200 {
+                    Text("+ \(paths.count - 200) more").font(.caption2).foregroundStyle(.tertiary)
+                        .padding(.horizontal, 12).padding(.vertical, 5)
                 }
             }
         }

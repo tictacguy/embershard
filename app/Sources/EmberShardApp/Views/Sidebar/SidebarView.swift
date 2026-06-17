@@ -16,8 +16,24 @@ struct SidebarView: View {
     @State private var picked: Set<UUID> = []
     @State private var confirmDelete = false
 
+    private var noModel: Bool { modelStore.models.isEmpty }
+
     var body: some View {
         VStack(spacing: 0) {
+            // Search field (a plain field — `.searchable(.sidebar)` renders too
+            // narrow on macOS before 26).
+            HStack(spacing: 6) {
+                Image(systemName: "magnifyingglass").font(.caption).foregroundStyle(.secondary)
+                TextField("Search", text: $searchText).textFieldStyle(.plain)
+                if !searchText.isEmpty {
+                    Button { searchText = "" } label: { Image(systemName: "xmark.circle.fill") }
+                        .buttonStyle(.plain).foregroundStyle(.secondary)
+                }
+            }
+            .padding(.horizontal, 8).padding(.vertical, 6)
+            .background(Color.primary.opacity(0.06), in: RoundedRectangle(cornerRadius: 8))
+            .padding(.horizontal, 8).padding(.top, 8).padding(.bottom, 4)
+
             // Chat list
             List(selection: Binding(
                 get: { selectMode ? nil : appState.selectedChatId },
@@ -67,17 +83,26 @@ struct SidebarView: View {
                 }
             }
             .listStyle(.sidebar)
-            .searchable(text: $searchText, placement: .sidebar, prompt: "Search")
             .overlay {
                 if chatStore.chats.isEmpty && chatStore.projects.isEmpty {
-                    ContentUnavailableView {
-                        Label("No chats yet", systemImage: "bubble.left.and.bubble.right")
-                    } description: {
-                        Text("Create a new chat to get started.")
-                    } actions: {
-                        Button("New Chat") { appState.selectedProjectId = nil; appState.requestNewChat() }
-                            .buttonStyle(.borderedProminent)
-                            .disabled(modelStore.activeModelPath.isEmpty)
+                    if noModel {
+                        ContentUnavailableView {
+                            Label("No model yet", systemImage: "arrow.down.circle")
+                        } description: {
+                            Text("Download a model to start chatting.")
+                        } actions: {
+                            Button("Open Settings") { showSettings = true }
+                                .buttonStyle(.borderedProminent)
+                        }
+                    } else {
+                        ContentUnavailableView {
+                            Label("No chats yet", systemImage: "bubble.left.and.bubble.right")
+                        } description: {
+                            Text("Create a new chat to get started.")
+                        } actions: {
+                            Button("New Chat") { appState.selectedProjectId = nil; appState.requestNewChat() }
+                                .buttonStyle(.borderedProminent)
+                        }
                     }
                 }
             }
@@ -280,10 +305,11 @@ private struct ChatRow: View {
                 }
                 .buttonStyle(.plain)
             }
-            Label(chat.title, systemImage: chat.icon)
-                .font(.body)
-                .lineLimit(1)
+            Image(systemName: chat.icon).frame(width: 18)
+            Text(chat.title).font(.body).lineLimit(1).truncationMode(.tail)
+            Spacer(minLength: 0)
         }
+        .frame(maxWidth: .infinity, alignment: .leading)
         .contentShape(Rectangle())
         .onTapGesture { if selectMode { onPick() } else { onOpen() } }
         .contextMenu {
@@ -331,14 +357,14 @@ private struct ProjectRow: View {
                         }
                         .buttonStyle(.plain)
                     }
-                    Label(chat.title, systemImage: chat.icon)
-                        .font(.body)
-                        .lineLimit(1)
+                    Image(systemName: chat.icon).frame(width: 18)
+                    Text(chat.title).font(.body).lineLimit(1).truncationMode(.tail)
+                    Spacer(minLength: 0)
                 }
+                .frame(maxWidth: .infinity, alignment: .leading)
                 .tag(chat.id)
                 .contentShape(Rectangle())
                 .contextMenu {
-                    Button("Select") { onEnterSelect(chat.id) }
                     Button("Select") { onEnterSelect(chat.id) }
                     Button("Remove from project") {
                         chatStore.moveChat(id: chat.id, toProject: nil)
@@ -365,15 +391,16 @@ private struct ProjectRow: View {
                     }
                     .buttonStyle(.plain)
                 }
-                Label(project.name, systemImage: project.icon)
-                    .font(.body.weight(.medium))
-                Spacer()
+                Image(systemName: project.icon).frame(width: 18)
+                Text(project.name).font(.body.weight(.medium)).lineLimit(1).truncationMode(.tail)
+                Spacer(minLength: 0)
                 if !selectMode && hovering {
                     Button { onNewChat() } label: { Image(systemName: "plus") }
                         .buttonStyle(.plain).foregroundStyle(.secondary)
                         .help("New chat in this project")
                 }
             }
+            .frame(maxWidth: .infinity, alignment: .leading)
             .contentShape(Rectangle())
             .onHover { hovering = $0 }
             .onTapGesture { if selectMode { onTogglePick(project.id) } }

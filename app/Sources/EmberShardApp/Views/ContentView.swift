@@ -6,6 +6,7 @@ struct ContentView: View {
     @EnvironmentObject var appState:   AppState
 
     @State private var columnVisibility: NavigationSplitViewVisibility = .all
+    @ObservedObject private var updater = UpdateChecker.shared
 
     var body: some View {
         NavigationSplitView(columnVisibility: $columnVisibility) {
@@ -13,6 +14,12 @@ struct ContentView: View {
                 .navigationSplitViewColumnWidth(min: 200, ideal: 250, max: 300)
         } detail: {
             VStack(spacing: 0) {
+                if let upd = updater.available {
+                    UpdateBanner(version: upd.version,
+                                 downloading: updater.downloading,
+                                 onUpdate: { updater.update() },
+                                 onDismiss: { updater.dismiss() })
+                }
                 if !appState.openTabs.isEmpty {
                     ChromeTabBar()
                 }
@@ -28,6 +35,7 @@ struct ContentView: View {
         }
         .navigationSplitViewStyle(.balanced)
         .frame(minWidth: 800, minHeight: 560)
+        .task { await updater.check() }
         .onChange(of: appState.newChatRequested) { _, requested in
             if requested { showNewChatPicker = true; appState.newChatRequested = false }
         }
@@ -59,6 +67,39 @@ struct ContentView: View {
         }
         chatStore.addChat(chat)
         appState.openTab(chatId: chat.id)
+    }
+}
+
+// MARK: - Update banner
+
+private struct UpdateBanner: View {
+    let version: String
+    let downloading: Bool
+    let onUpdate: () -> Void
+    let onDismiss: () -> Void
+
+    var body: some View {
+        HStack(spacing: 10) {
+            Image(systemName: "arrow.down.circle.fill").foregroundStyle(.white)
+            Text("Embershard \(version) is available")
+                .font(.subheadline.weight(.medium)).foregroundStyle(.white)
+            Spacer()
+            if downloading {
+                ProgressView().controlSize(.small).tint(.white)
+                Text("Downloading…").font(.caption).foregroundStyle(.white.opacity(0.9))
+            } else {
+                Button(action: onUpdate) {
+                    Text("Update").font(.subheadline.weight(.semibold))
+                        .padding(.horizontal, 12).padding(.vertical, 4)
+                        .background(.white, in: Capsule()).foregroundStyle(.black)
+                }
+                .buttonStyle(.plain)
+            }
+            Button(action: onDismiss) { Image(systemName: "xmark").font(.caption.weight(.bold)) }
+                .buttonStyle(.plain).foregroundStyle(.white.opacity(0.8))
+        }
+        .padding(.horizontal, 14).padding(.vertical, 8)
+        .background(Color.accentColor)
     }
 }
 
