@@ -4,7 +4,7 @@
 
 ### [⬇️ Download the latest .dmg](https://github.com/tictacguy/embershard/releases/latest)
 
-**Latest release:** v0.1.3
+**Latest release:** v0.1.4
 
 Grab the signed `.dmg` from the latest release, drag Embershard into
 Applications, and right-click → Open the first time (you'll need to approve it's opening by going to System Settings->Privacy and Security->Scroll down until "Security" section and click "Open Anyway"). No clone, no toolchain. Apple Silicon, macOS 14 or newer.

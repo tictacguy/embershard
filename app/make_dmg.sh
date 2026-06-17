@@ -18,7 +18,7 @@ BUILD_DIR="$REPO_ROOT/build"
 DIST_DIR="$SCRIPT_DIR/dist"
 APP_NAME="Embershard"
 APP="$DIST_DIR/$APP_NAME.app"
-VERSION="0.1.3"
+VERSION="0.1.4"
 VOL_NAME="$APP_NAME $VERSION"
 NCPU="$(sysctl -n hw.ncpu)"
 
@@ -29,6 +29,7 @@ cmake -B "$BUILD_DIR" \
     -DGGML_METAL=ON \
     -DGGML_METAL_EMBED_LIBRARY=ON \
     -DCMAKE_BUILD_TYPE=Release \
+    -DCMAKE_OSX_DEPLOYMENT_TARGET=14.0 \
     -S "$REPO_ROOT" \
     -Wno-dev 2>/dev/null
 cmake --build "$BUILD_DIR" --target embershard_engine -j"$NCPU"

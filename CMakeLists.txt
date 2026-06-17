@@ -3,6 +3,7 @@ project(embershard C)
 
 set(CMAKE_C_STANDARD 11)
 set(CMAKE_C_STANDARD_REQUIRED ON)
+set(CMAKE_OSX_DEPLOYMENT_TARGET "14.0" CACHE STRING "Minimum macOS version")
 
 # --- Metal-first: macOS backend primario ---
 if(APPLE)
