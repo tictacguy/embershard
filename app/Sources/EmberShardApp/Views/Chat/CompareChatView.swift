@@ -122,10 +122,21 @@ struct CompareChatView: View {
             },
             onSend: { if canSend { send() } },
             onCancel: cancel,
-            kindBadge: nil,
-            showModelPicker: false
+            showModelPicker: false,
+            toggleActive: chat?.agentMode ?? false,
+            toggleLabel: "Agent",
+            toggleIcon: "wand.and.stars",
+            onToggle: {
+                guard var c = chat else { return }
+                c.agentMode.toggle()
+                chatStore.updateChat(c)
+            }
         )
     }
+
+    private static let agentSystem =
+        "Work like an agent: briefly outline a plan as numbered steps, then carry it "
+      + "out and give the final answer. Be concise."
 
     private var canSend: Bool { busy || !input.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty }
 
@@ -157,8 +168,10 @@ struct CompareChatView: View {
         let maxTokens = Int32(UserDefaults.standard.integer(forKey: "es_max_tokens").nonZeroOr(2048))
         let samp = nativeSamplingFromSettings()
         let runner = self.runner
-        // Optional skill applies the same system prompt to every model under test.
-        let system: String? = chat?.skillId.flatMap { skillsStore.skill(id: $0)?.systemPrompt }
+        // Optional skill + agent mode form the system prompt applied to every model.
+        let skillSys = chat?.skillId.flatMap { skillsStore.skill(id: $0)?.systemPrompt }
+        let parts = [(chat?.agentMode ?? false) ? Self.agentSystem : nil, skillSys].compactMap { $0 }
+        let system: String? = parts.isEmpty ? nil : parts.joined(separator: "\n\n")
 
         loadingModels = true
         warmupPhrase = EngineUI.warmupMessages.randomElement() ?? "Warming up the engine..."

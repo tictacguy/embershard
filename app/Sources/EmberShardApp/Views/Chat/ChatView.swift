@@ -50,10 +50,10 @@ struct ChatView: View {
     }
 
     var body: some View {
-        if chat?.kind == .compare {
-            CompareChatView(chatId: chatId)
-        } else {
-            standardBody
+        switch chat?.kind {
+        case .compare: CompareChatView(chatId: chatId)
+        case .macos:   MacHelperChatView(chatId: chatId)
+        default:       standardBody
         }
     }
 
@@ -138,16 +138,23 @@ struct ChatView: View {
             },
             onSend: sendOrOrchestrate,
             onCancel: cancelGeneration,
-            kindBadge: chat?.kind == .agent ? "Agentic" : nil
+            toggleActive: chat?.agentMode ?? false,
+            toggleLabel: "Agent",
+            toggleIcon: "wand.and.stars",
+            onToggle: {
+                guard var c = chat else { return }
+                c.agentMode.toggle()
+                chatStore.updateChat(c)
+            }
         )
     }
 
     // MARK: - Routing
 
     private func sendOrOrchestrate() {
-        // Route by the chat's kind chosen at creation. Agentic chats run the
-        // planner→executor pipeline (trivial greetings stay a quick direct reply).
-        if chat?.kind == .agent && !isTrivialGreeting(inputText) {
+        // Agent toggle runs the planner→executor pipeline (trivial greetings stay
+        // a quick direct reply).
+        if (chat?.agentMode ?? false) && !isTrivialGreeting(inputText) {
             orchestrateMessage()
         } else {
             sendMessageNative()
@@ -471,19 +478,9 @@ struct ChatView: View {
 
             await MainActor.run {
                 finishGeneration(msgId: msgId, tokenCount: answerTokens)
-                // Agentic chats keep a fixed, recognizable icon (like compare).
-                if chat?.title == "New chat" { setFixedTitle(from: text, icon: "wand.and.stars") }
+                if chat?.title == "New chat" { generateTitleNative(from: text) }
             }
         }
-    }
-
-    // Fixed icon + short title from the first message (no LLM call).
-    private func setFixedTitle(from msg: String, icon: String) {
-        let title = msg.split(whereSeparator: { $0 == " " || $0 == "\n" })
-            .prefix(6).joined(separator: " ")
-        guard !title.isEmpty else { return }
-        chatStore.setChatTitle(id: chatId, title: String(title.prefix(60)))
-        chatStore.setChatIcon(id: chatId, icon: icon)
     }
 
     // MARK: - Title generation

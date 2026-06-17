@@ -51,9 +51,9 @@ struct ContentView: View {
         var chat = Chat(modelPath: modelStore.activeModelPath,
                         projectId: appState.selectedProjectId,
                         kind: kind, compareModels: compareModels)
-        // Give agent/arena chats their recognizable icon up front (sidebar + tabs).
+        // Give helper/arena chats their recognizable icon up front (sidebar + tabs).
         switch kind {
-        case .agent:   chat.icon = "wand.and.stars"
+        case .macos:   chat.icon = "apple.logo"; chat.agentMode = true
         case .compare: chat.icon = "rectangle.split.3x1.fill"
         case .standard: break
         }
@@ -264,23 +264,33 @@ struct NewChatSheet: View {
     @State private var kind: ChatKind = .standard
     @State private var selected: [String] = []
 
+    // Arena fits 2 models on 16 GB; 4 once you have 32 GB+.
+    private var maxArena: Int {
+        ProcessInfo.processInfo.physicalMemory >= 32 * 1024 * 1024 * 1024 ? 4 : 2
+    }
+
     var body: some View {
         VStack(alignment: .leading, spacing: 18) {
             Text("New chat").font(.title2.weight(.semibold))
 
             HStack(spacing: 12) {
                 typeCard(.standard, "Standard", "bubble.left.fill",
-                         "Chat with one model.")
-                typeCard(.agent, "Agentic", "wand.and.stars",
-                         "For complex tasks: plans, then executes.")
+                         "Chat with one model. Toggle Agent for multi-step tasks.")
+                typeCard(.macos, "Pomme", "apple.logo",
+                         "A macOS assistant that is hable to handle tasks on your Mac.", beta: true)
                 typeCard(.compare, "Arena", "rectangle.split.3x1.fill",
                          "Ask up to 4 models at once.")
             }
 
             if kind == .compare {
                 VStack(alignment: .leading, spacing: 6) {
-                    Text("Pick up to 4 models (\(selected.count)/4)")
+                    Text("Pick up to \(maxArena) models (\(selected.count)/\(maxArena))")
                         .font(.subheadline).foregroundStyle(.secondary)
+                    if maxArena < 4 {
+                        Label("Your GPU has under 32 GB, so Arena runs 2 models at once here. 32 GB+ unlocks 4.",
+                              systemImage: "info.circle")
+                            .font(.caption2).foregroundStyle(.tertiary)
+                    }
                     ScrollView {
                         VStack(spacing: 2) {
                             ForEach(models) { m in modelRow(m) }
@@ -311,13 +321,27 @@ struct NewChatSheet: View {
         return false
     }
 
-    private func typeCard(_ k: ChatKind, _ title: String, _ icon: String, _ desc: String) -> some View {
+    private func toggleModel(_ m: LocalModel) {
+        if selected.contains(m.path) { selected.removeAll { $0 == m.path } }
+        else if selected.count < maxArena { selected.append(m.path) }
+    }
+
+    private func typeCard(_ k: ChatKind, _ title: String, _ icon: String, _ desc: String,
+                          beta: Bool = false) -> some View {
         let on = kind == k
         return Button { kind = k } label: {
             VStack(spacing: 8) {
                 Image(systemName: icon).font(.system(size: 22))
                     .foregroundStyle(on ? appState.accentColor : .secondary)
-                Text(title).font(.subheadline.weight(.medium))
+                HStack(spacing: 5) {
+                    Text(title).font(.subheadline.weight(.medium))
+                    if beta {
+                        Text("BETA").font(.system(size: 8, weight: .bold))
+                            .padding(.horizontal, 4).padding(.vertical, 1)
+                            .background(Color.orange.opacity(0.18), in: Capsule())
+                            .foregroundStyle(.orange)
+                    }
+                }
                 Text(desc).font(.caption2).foregroundStyle(.tertiary)
                     .multilineTextAlignment(.center).fixedSize(horizontal: false, vertical: true)
             }
@@ -333,10 +357,7 @@ struct NewChatSheet: View {
 
     private func modelRow(_ m: LocalModel) -> some View {
         let on = selected.contains(m.path)
-        return Button {
-            if on { selected.removeAll { $0 == m.path } }
-            else if selected.count < 4 { selected.append(m.path) }
-        } label: {
+        return Button { toggleModel(m) } label: {
             HStack(spacing: 8) {
                 Image(systemName: on ? "checkmark.circle.fill" : "circle")
                     .foregroundStyle(on ? appState.accentColor : Color.secondary)
@@ -348,6 +369,6 @@ struct NewChatSheet: View {
             .contentShape(Rectangle())
         }
         .buttonStyle(.plain)
-        .disabled(!on && selected.count >= 4)
+        .disabled(!on && selected.count >= maxArena)
     }
 }
