@@ -25,7 +25,7 @@ struct ChatView: View {
     private static let warmupMessages = EngineUI.warmupMessages
 
     private var logoImage: NSImage? {
-        guard let url = Bundle.module.url(forResource: "logo", withExtension: "svg"),
+        guard let url = AppResources.bundle?.url(forResource: "logo", withExtension: "svg"),
               let img = NSImage(contentsOf: url) else { return nil }
         img.isTemplate = true
         return img

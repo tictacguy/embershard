@@ -32,7 +32,7 @@ enum ProviderIcon {
     static func nsImage(for modelName: String) -> NSImage? {
         guard let provider = providerName(for: modelName) else { return nil }
 
-        let bundle = Bundle.module
+        guard let bundle = AppResources.bundle else { return nil }
         let extensions = ["png", "webp", "svg"]
 
         for ext in extensions {
