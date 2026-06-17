@@ -201,6 +201,7 @@ struct SidebarView: View {
             .padding(24)
             .frame(width: 420)
         }
+        .frame(minWidth: 220, maxWidth: .infinity, alignment: .leading)
         .navigationTitle("Embershard")
     }
 
@@ -306,10 +307,11 @@ private struct ChatRow: View {
                 .buttonStyle(.plain)
             }
             Image(systemName: chat.icon).frame(width: 18)
-            // Fixed-width frame: in a macOS 14 List a Text without a definite
-            // width truncates to its first letter. (ChromeTab works for the same reason.)
-            Text(chat.title).font(.body).lineLimit(1).truncationMode(.tail)
-                .frame(maxWidth: 210, alignment: .leading)
+            // fixedSize forces the Text to its intrinsic width; in a macOS 14 List a
+            // Text otherwise gets a near-zero proposed width and shows one letter.
+            Text(chat.title).font(.body).lineLimit(1)
+                .fixedSize(horizontal: true, vertical: false)
+            Spacer(minLength: 0)
         }
         .frame(maxWidth: .infinity, alignment: .leading)
         .contentShape(Rectangle())
@@ -360,8 +362,9 @@ private struct ProjectRow: View {
                         .buttonStyle(.plain)
                     }
                     Image(systemName: chat.icon).frame(width: 18)
-                    Text(chat.title).font(.body).lineLimit(1).truncationMode(.tail)
-                        .frame(maxWidth: 190, alignment: .leading)
+                    Text(chat.title).font(.body).lineLimit(1)
+                        .fixedSize(horizontal: true, vertical: false)
+                    Spacer(minLength: 0)
                 }
                 .frame(maxWidth: .infinity, alignment: .leading)
                 .tag(chat.id)
@@ -394,8 +397,8 @@ private struct ProjectRow: View {
                     .buttonStyle(.plain)
                 }
                 Image(systemName: project.icon).frame(width: 18)
-                Text(project.name).font(.body.weight(.medium)).lineLimit(1).truncationMode(.tail)
-                    .frame(maxWidth: 170, alignment: .leading)
+                Text(project.name).font(.body.weight(.medium)).lineLimit(1)
+                    .fixedSize(horizontal: true, vertical: false)
                 Spacer(minLength: 0)
                 if !selectMode && hovering {
                     Button { onNewChat() } label: { Image(systemName: "plus") }

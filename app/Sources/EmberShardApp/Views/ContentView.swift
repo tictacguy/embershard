@@ -11,7 +11,7 @@ struct ContentView: View {
     var body: some View {
         NavigationSplitView(columnVisibility: $columnVisibility) {
             SidebarView()
-                .navigationSplitViewColumnWidth(min: 200, ideal: 250, max: 300)
+                .navigationSplitViewColumnWidth(min: 240, ideal: 260, max: 360)
         } detail: {
             VStack(spacing: 0) {
                 if let upd = updater.available {
@@ -81,8 +81,12 @@ private struct UpdateBanner: View {
     var body: some View {
         HStack(spacing: 10) {
             Image(systemName: "arrow.down.circle.fill").foregroundStyle(.white)
-            Text("Embershard \(version) is available")
-                .font(.subheadline.weight(.medium)).foregroundStyle(.white)
+            VStack(alignment: .leading, spacing: 1) {
+                Text("Embershard \(version) is available")
+                    .font(.subheadline.weight(.medium)).foregroundStyle(.white)
+                Text("Quit Embershard before dragging the new app into Applications, or macOS won't let you replace it.")
+                    .font(.caption2).foregroundStyle(.white.opacity(0.85))
+            }
             Spacer()
             if downloading {
                 ProgressView().controlSize(.small).tint(.white)
