@@ -18,7 +18,7 @@ BUILD_DIR="$REPO_ROOT/build"
 DIST_DIR="$SCRIPT_DIR/dist"
 APP_NAME="Embershard"
 APP="$DIST_DIR/$APP_NAME.app"
-VERSION="0.1.2"
+VERSION="0.1.3"
 VOL_NAME="$APP_NAME $VERSION"
 NCPU="$(sysctl -n hw.ncpu)"
 
@@ -79,12 +79,43 @@ find "$BUILD_DIR" -maxdepth 3 -name "lib*.dylib" ! -type l | while IFS= read -r 
     echo "  + $libname"
 done
 
+# Create version symlinks (e.g. libllama.0.dylib -> libllama.0.0.1.dylib)
+pushd "$APP/Contents/Frameworks" > /dev/null
+for f in lib*.*.*.*.dylib; do
+    [ -f "$f" ] || continue
+    short="$(echo "$f" | sed -E 's/\.[0-9]+\.[0-9]+\.dylib/.dylib/')"
+    [ ! -e "$short" ] && ln -sf "$f" "$short"
+    bare="$(echo "$f" | sed -E 's/\.[0-9]+\.[0-9]+\.[0-9]+\.dylib/.dylib/')"
+    [ ! -e "$bare" ] && ln -sf "$f" "$bare"
+done
+popd > /dev/null
+
+# Fix load paths in binary
 BIN="$APP/Contents/MacOS/$APP_NAME"
 for dylib in "$APP/Contents/Frameworks/"*.dylib; do
+    [ -L "$dylib" ] && continue
     libname="$(basename "$dylib")"
     install_name_tool -change "$BUILD_DIR/$libname" "@rpath/$libname" "$BIN" 2>/dev/null || true
+    install_name_tool -change "$BUILD_DIR/bin/$libname" "@rpath/$libname" "$BIN" 2>/dev/null || true
+done
+# Also fix symlink names
+for link in "$APP/Contents/Frameworks/"*.dylib; do
+    libname="$(basename "$link")"
+    install_name_tool -change "$BUILD_DIR/$libname" "@rpath/$libname" "$BIN" 2>/dev/null || true
+    install_name_tool -change "$BUILD_DIR/bin/$libname" "@rpath/$libname" "$BIN" 2>/dev/null || true
 done
 install_name_tool -add_rpath "@executable_path/../Frameworks" "$BIN" 2>/dev/null || true
+
+# Fix inter-dylib references
+for dylib in "$APP/Contents/Frameworks/"*.dylib; do
+    [ -L "$dylib" ] && continue
+    for other in "$APP/Contents/Frameworks/"*.dylib; do
+        othername="$(basename "$other")"
+        install_name_tool -change "$BUILD_DIR/$othername" "@rpath/$othername" "$dylib" 2>/dev/null || true
+        install_name_tool -change "$BUILD_DIR/bin/$othername" "@rpath/$othername" "$dylib" 2>/dev/null || true
+    done
+    install_name_tool -add_rpath "@loader_path" "$dylib" 2>/dev/null || true
+done
 
 # ── 5. Sign ──────────────────────────────────────────────────────────────────
 
