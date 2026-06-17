@@ -84,10 +84,25 @@ private struct DisplaySettingsView: View {
                     Label("Show token count and context usage", systemImage: "number")
                 }
             }
+
+            Section("About") {
+                HStack {
+                    Label("Version", systemImage: "info.circle")
+                    Spacer()
+                    Text(Self.appVersion).foregroundStyle(.secondary).monospacedDigit()
+                }
+            }
         }
         .formStyle(.grouped)
         .padding()
         .onAppear { applyAppearance(appearance) }
+    }
+
+    static var appVersion: String {
+        let info = Bundle.main.infoDictionary
+        let v = info?["CFBundleShortVersionString"] as? String ?? "—"
+        let b = info?["CFBundleVersion"] as? String ?? "—"
+        return "\(v) (\(b))"
     }
 
     private func applyAppearance(_ mode: String) {
