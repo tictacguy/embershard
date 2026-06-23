@@ -18,7 +18,7 @@ BUILD_DIR="$REPO_ROOT/build"
 DIST_DIR="$SCRIPT_DIR/dist"
 APP_NAME="Embershard"
 APP="$DIST_DIR/$APP_NAME.app"
-VERSION="0.1.9"
+VERSION="0.1.10"
 VOL_NAME="$APP_NAME $VERSION"
 NCPU="$(sysctl -n hw.ncpu)"
 

@@ -322,10 +322,13 @@ struct ChatView: View {
                                                             history: history, user: userText,
                                                             maxTokens: maxTok, sampling: samp,
                                                             forceFull: forceFull)
+                var raw = ""
                 for try await piece in stream {
                     guard !Task.isCancelled else { break }
                     tokenCount += 1
-                    await MainActor.run { chatStore.appendToMessage(id: msgId, inChatId: chatId, piece: piece) }
+                    raw += piece
+                    // Split <think> reasoning out of the answer as it streams.
+                    await MainActor.run { chatStore.setStreamedText(id: msgId, inChatId: chatId, raw: raw) }
                 }
             } catch is CancellationError {
                 // partial turn -> stale KV; cancelGeneration sets nativeNeedsReplay
