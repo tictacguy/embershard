@@ -21,13 +21,14 @@ struct Message: Codable, Identifiable {
     var contextFraction: Double = 0 // fraction of context window in use when this was generated
     var agentSteps: [AgentStep] = [] // intermediate planner/executor output (agent mode)
     var fileResults: [String] = []   // file paths surfaced by a macOS-helper tool (reveal in Finder)
+    var reasoning: String = ""       // <think> chain-of-thought, shown collapsibly
 
     // Transient — not persisted, reset on load
     var isStreaming: Bool = false
     var agentStageName: String? = nil  // "Planning…" / "Executing…" / "Reviewing…" during agent mode
 
     enum CodingKeys: String, CodingKey {
-        case id, role, content, timestamp, modelName, tokenCount, contextFraction, agentSteps, fileResults
+        case id, role, content, timestamp, modelName, tokenCount, contextFraction, agentSteps, fileResults, reasoning
     }
 
     init(role: String, content: String = "", modelName: String = "") {
@@ -47,6 +48,7 @@ struct Message: Codable, Identifiable {
         contextFraction = (try? c.decode(Double.self, forKey: .contextFraction)) ?? 0
         agentSteps     = (try? c.decode([AgentStep].self, forKey: .agentSteps)) ?? []
         fileResults    = (try? c.decode([String].self, forKey: .fileResults)) ?? []
+        reasoning      = (try? c.decode(String.self, forKey: .reasoning)) ?? ""
     }
 }
 
@@ -516,6 +518,45 @@ final class ChatStore: ObservableObject {
         guard let cidx = chats.firstIndex(where: { $0.id == chatId }),
               let midx = chats[cidx].messages.firstIndex(where: { $0.id == msgId }) else { return }
         chats[cidx].messages[midx].content += piece
+    }
+
+    // Set a streaming message from the full raw text so far, splitting any
+    // <think>…</think> chain-of-thought (reasoning models) out of the answer.
+    func setStreamedText(id msgId: UUID, inChatId chatId: UUID, raw: String) {
+        guard let cidx = chats.firstIndex(where: { $0.id == chatId }),
+              let midx = chats[cidx].messages.firstIndex(where: { $0.id == msgId }) else { return }
+        let (reasoning, content) = Self.splitReasoning(raw)
+        chats[cidx].messages[midx].reasoning = reasoning
+        chats[cidx].messages[midx].content = content
+    }
+
+    // Reasoning delimiters used across models. Each is (open, close); the open
+    // markers also cover models that emit a bare leading token like "/think".
+    private static let reasoningMarkers: [(open: String, close: String)] = [
+        ("<think>", "</think>"),
+        ("<thinking>", "</thinking>"),
+        ("◁think▷", "◁/think▷"),
+        ("/think", "/no_think"),
+    ]
+
+    static func splitReasoning(_ raw: String) -> (reasoning: String, content: String) {
+        // Pick whichever opening marker appears first.
+        var best: (range: Range<String.Index>, close: String)?
+        for m in reasoningMarkers {
+            if let r = raw.range(of: m.open) {
+                if best == nil || r.lowerBound < best!.range.lowerBound { best = (r, m.close) }
+            }
+        }
+        guard let found = best else { return ("", raw) }
+        let before = String(raw[..<found.range.lowerBound])
+        let after = raw[found.range.upperBound...]
+        if let close = after.range(of: found.close) {
+            let reasoning = String(after[..<close.lowerBound])
+            let content = before + String(after[close.upperBound...])
+            return (reasoning.trimmingCharacters(in: .whitespacesAndNewlines), content)
+        }
+        // Still inside the reasoning block — everything after the marker is reasoning.
+        return (String(after).trimmingCharacters(in: .whitespacesAndNewlines), before)
     }
 
     func setAgentStage(msgId: UUID, inChatId chatId: UUID, stageName: String?) {

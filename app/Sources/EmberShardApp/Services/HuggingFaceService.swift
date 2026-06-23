@@ -24,19 +24,49 @@ struct HFModelEntry: Identifiable, Hashable {
         "deepseek-ai", "nvidia", "ibm-granite", "tiiuae", "huggingfacetb",
     ]
 
-    // Compatible == an architecture our native engine (es_gx) implements: the
-    // llama family (Llama, Mistral, TinyLlama…) and qwen2 (Qwen2/2.5,
-    // DeepSeek-R1-Distill-Qwen). Excludes MoE and unsupported architectures.
+    // Our native engine (es_gx) implements the llama family (Llama, Mistral,
+    // TinyLlama…) and qwen2 (Qwen2/2.5, DeepSeek-R1-Distill-Qwen, and the many
+    // Qwen fine-tunes that don't say "qwen" in the name). We can only be sure a
+    // model is UNSUPPORTED when it clearly names another architecture; otherwise
+    // we list it optimistically and the real arch check happens after download.
     static func inferCompatible(_ s: String) -> Bool {
         let l = s.lowercased()
         let bad = ["phi", "gemma", "gpt-oss", "gpt-neox", "falcon", "mpt", "bloom",
-                   "mamba", "rwkv", "mixtral", "-moe", "deepseek-v2", "deepseek-v3",
-                   "deepseek-coder-v2", "command-r", "stablelm", "starcoder", "vl", "vision"]
-        if bad.contains(where: { l.contains($0) }) { return false }
-        let good = ["llama", "qwen", "mistral", "tinyllama"]
-        return good.contains(where: { l.contains($0) })
+                   "mamba", "rwkv", "mixtral", "-moe", "moe-", "deepseek-v2", "deepseek-v3",
+                   "deepseek-coder-v2", "command-r", "stablelm", "starcoder",
+                   "-vl", "vision", "internlm", "yi-", "glm", "baichuan", "cohere"]
+        return !bad.contains(where: { l.contains($0) })
     }
     var compatible: Bool { HFModelEntry.inferCompatible(repoId + " " + name) }
+
+    // A placeholder is a repo we found but that ships no GGUF build (e.g. the
+    // original safetensors release) — shown so the pasted model is still visible.
+    var isPlaceholder: Bool { filename.isEmpty }
+    var pageURL: URL { URL(string: "https://huggingface.co/\(repoId)")! }
+
+    enum Availability: Equatable { case available, tooBig(Int), unsupported, noBuild }
+    func availability(ramGB: Int) -> Availability {
+        if isPlaceholder { return compatible ? .noBuild : .unsupported }
+        if !compatible { return .unsupported }
+        if minRAMGB > ramGB { return .tooBig(minRAMGB) }
+        return .available
+    }
+
+    // Stand-in for a repo with no GGUF build, so a pasted "org/name" still shows.
+    static func placeholder(repoId: String) -> HFModelEntry {
+        HFModelEntry(
+            repoId: repoId,
+            name: repoId.components(separatedBy: "/").last ?? repoId,
+            filename: "",
+            sizeGB: 0,
+            quantization: "",
+            minRAMGB: 0,
+            description: "No GGUF build found on HuggingFace",
+            downloadURL: URL(string: "https://huggingface.co/\(repoId)")!,
+            downloads: 0,
+            likes: 0
+        )
+    }
 
     static func == (lhs: HFModelEntry, rhs: HFModelEntry) -> Bool { lhs.id == rhs.id }
     func hash(into hasher: inout Hasher) { hasher.combine(id) }
@@ -112,29 +142,41 @@ final class HuggingFaceService: ObservableObject {
         )
     }
 
-    /// Search HF API (only when user explicitly searches)
+    /// Search HF for any GGUF model. We list everything found (big or unsupported
+    /// models are shown but flagged), so a paste like "WeiboAI/VibeThinker-3B" finds
+    /// its community GGUF repacks by name.
     func search(query: String, maxSizeGB: Double) async {
-        guard !query.isEmpty else {
-            models = Self.curatedModels.filter { $0.sizeGB <= maxSizeGB }
-            return
-        }
+        let q = query.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !q.isEmpty else { models = Self.curatedModels; return }
 
         isFetching = true
         defer { isFetching = false }
 
-        if let results = await searchHF(query: "\(query) GGUF", maxSizeGB: maxSizeGB) {
-            var seen = Set<String>()
-            models = results
-                .sorted { $0.downloads > $1.downloads }
-                .filter { seen.insert($0.filename.lowercased()).inserted }
+        // Search by the bare model name; the original repo (e.g. WeiboAI/…) often
+        // has no GGUF, but a repacker (bartowski, mradermacher, …) usually does.
+        let term = q.contains("/") ? String(q.split(separator: "/").last ?? "") : q
+        var results = await searchHF(query: term) ?? []
+        // If they pasted an exact repo id, also pull that repo's own GGUF files.
+        if q.contains("/"), let direct = await entriesForRepo(q) { results += direct }
+
+        var seen = Set<String>()
+        var deduped = results
+            .sorted { $0.downloads > $1.downloads }
+            .filter { seen.insert($0.id.lowercased()).inserted }
+
+        // Pasted an exact repo but nothing GGUF surfaced for it? Show the repo
+        // itself as a (non-runnable) placeholder so the user still sees what they typed.
+        if q.contains("/"), !deduped.contains(where: { $0.repoId.lowercased() == q.lowercased() }) {
+            deduped.append(.placeholder(repoId: q))
         }
+        models = deduped
     }
 
     // MARK: - HF API
 
-    private func searchHF(query: String, maxSizeGB: Double) async -> [HFModelEntry]? {
-        let encoded = query.addingPercentEncoding(withAllowedCharacters: .urlQueryAllowed) ?? query
-        let urlStr = "https://huggingface.co/api/models?search=\(encoded)&filter=gguf&sort=downloads&direction=-1&limit=20"
+    private func searchHF(query: String) async -> [HFModelEntry]? {
+        let encoded = "\(query) GGUF".addingPercentEncoding(withAllowedCharacters: .urlQueryAllowed) ?? query
+        let urlStr = "https://huggingface.co/api/models?search=\(encoded)&filter=gguf&sort=downloads&direction=-1&limit=40"
         guard let url = URL(string: urlStr) else { return nil }
 
         var request = URLRequest(url: url)
@@ -145,53 +187,49 @@ final class HuggingFaceService: ObservableObject {
         guard let repos = try? JSONDecoder().decode([HFRepoResponse].self, from: data) else { return nil }
 
         var entries: [HFModelEntry] = []
-
-        for repo in repos.prefix(15) {
-            // Skip embedding models
+        for repo in repos.prefix(25) {
             let lower = repo.id.lowercased()
-            if lower.contains("embed") || lower.contains("bge-") || lower.contains("e5-") || lower.contains("gte-") {
-                continue
-            }
+            if lower.contains("embed") || lower.contains("bge-") || lower.contains("e5-") || lower.contains("gte-") { continue }
             guard let files = await fetchRepoFiles(repo: repo.id) else { continue }
-
-            let preferredQuants = ["Q4_K_M", "Q5_K_M", "Q4_K_S", "Q8_0"]
-            let ggufFiles = files.filter { f in
-                guard f.filename.hasSuffix(".gguf") else { return false }
-                // Skip all sharded files (any part marker)
-                let shardPattern = try? NSRegularExpression(pattern: "-\\d{5}-of-\\d{5}")
-                if let _ = shardPattern?.firstMatch(in: f.filename, range: NSRange(f.filename.startIndex..., in: f.filename)) {
-                    return false
-                }
-                let upper = f.filename.uppercased()
-                return preferredQuants.contains { upper.contains($0) }
-            }
-
-            for file in ggufFiles {
-                let sizeGB = Double(file.size) / 1_073_741_824.0
-                guard sizeGB > 0.5 && sizeGB <= maxSizeGB else { continue }
-
-                let quant = parseQuantization(from: file.filename)
-                guard !quant.isEmpty else { continue }
-
-                let minRAM = estimateMinRAM(sizeGB: sizeGB)
-                let downloadURL = URL(string: "https://huggingface.co/\(repo.id)/resolve/main/\(file.filename)")!
-
-                entries.append(HFModelEntry(
-                    repoId: repo.id,
-                    name: repo.id.components(separatedBy: "/").last ?? repo.id,
-                    filename: file.filename,
-                    sizeGB: sizeGB,
-                    quantization: quant,
-                    minRAMGB: minRAM,
-                    description: repo.id,
-                    downloadURL: downloadURL,
-                    downloads: repo.downloads ?? 0,
-                    likes: repo.likes ?? 0
-                ))
-            }
+            entries += ggufEntries(repoId: repo.id, downloads: repo.downloads ?? 0, likes: repo.likes ?? 0, files: files)
         }
-
         return entries
+    }
+
+    // Pull a specific repo's GGUF files directly (for an exact "org/name" paste).
+    private func entriesForRepo(_ repoId: String) async -> [HFModelEntry]? {
+        guard let files = await fetchRepoFiles(repo: repoId) else { return nil }
+        return ggufEntries(repoId: repoId, downloads: 0, likes: 0, files: files)
+    }
+
+    // Build entries for every non-sharded GGUF in a repo (any quant, any size —
+    // size/arch are surfaced as availability, not used to hide). Capped per repo.
+    private func ggufEntries(repoId: String, downloads: Int, likes: Int, files: [HFFileInfo]) -> [HFModelEntry] {
+        let shardPattern = try? NSRegularExpression(pattern: "-\\d{5}-of-\\d{5}")
+        var out: [HFModelEntry] = []
+        for file in files {
+            guard file.filename.hasSuffix(".gguf") else { continue }
+            if let p = shardPattern,
+               p.firstMatch(in: file.filename, range: NSRange(file.filename.startIndex..., in: file.filename)) != nil { continue }
+            let sizeGB = Double(file.size) / 1_073_741_824.0
+            guard sizeGB > 0.3 else { continue }
+            let quant = parseQuantization(from: file.filename)
+            guard !quant.isEmpty else { continue }
+            out.append(HFModelEntry(
+                repoId: repoId,
+                name: repoId.components(separatedBy: "/").last ?? repoId,
+                filename: file.filename,
+                sizeGB: sizeGB,
+                quantization: quant,
+                minRAMGB: estimateMinRAM(sizeGB: sizeGB),
+                description: repoId,
+                downloadURL: URL(string: "https://huggingface.co/\(repoId)/resolve/main/\(file.filename)")!,
+                downloads: downloads,
+                likes: likes
+            ))
+            if out.count >= 6 { break }   // don't flood with every quant of one repo
+        }
+        return out
     }
 
     private func fetchRepoFiles(repo: String) async -> [HFFileInfo]? {

@@ -1,4 +1,5 @@
 import SwiftUI
+import AppKit
 
 struct ModelBrowserView: View {
     @EnvironmentObject var modelStore: LocalModelStore
@@ -104,21 +105,29 @@ struct ModelBrowserView: View {
                         }
                         .padding(.vertical, 24)
                     } else {
-                        // Only models compatible with our native engine (llama / qwen2).
-                        let filteredModels = hf.models
-                            .filter { $0.compatible }
-                            .filter { $0.minRAMGB <= (scanner.info?.totalRAMGB ?? 999) }
-                        if filteredModels.isEmpty {
+                        let ram = scanner.info?.totalRAMGB ?? 999
+                        // Show everything found; sort runnable-here first, then too-big,
+                        // then unsupported. Nothing is hidden — just flagged.
+                        let sorted = hf.models.sorted { a, b in
+                            func rank(_ m: HFModelEntry) -> Int {
+                                switch m.availability(ramGB: ram) {
+                                case .available: return 0; case .tooBig: return 1
+                                case .unsupported: return 2; case .noBuild: return 3
+                                }
+                            }
+                            return rank(a) == rank(b) ? a.downloads > b.downloads : rank(a) < rank(b)
+                        }
+                        if sorted.isEmpty {
                             VStack(spacing: 8) {
                                 Image(systemName: "magnifyingglass")
                                     .font(.system(size: 28, weight: .light))
                                     .foregroundStyle(.tertiary)
                                 Text(searchText.isEmpty
-                                     ? "No compatible models for this machine."
-                                     : "No compatible results for “\(searchText)”.")
+                                     ? "Search HuggingFace for a model."
+                                     : "No GGUF found for “\(searchText)”.")
                                     .font(.subheadline)
                                     .foregroundStyle(.secondary)
-                                Text("We only list llama / qwen2 GGUFs that fit your RAM. Try another name (e.g. “qwen”, “llama”).")
+                                Text("The engine runs GGUF builds of llama / qwen2 models. Paste a repo id or a name (e.g. “qwen”, “llama”, “VibeThinker”).")
                                     .font(.caption)
                                     .foregroundStyle(.tertiary)
                                     .multilineTextAlignment(.center)
@@ -126,8 +135,8 @@ struct ModelBrowserView: View {
                             .frame(maxWidth: .infinity)
                             .padding(.vertical, 36)
                         } else {
-                            ForEach(filteredModels) { model in
-                                ModelRow(model: model)
+                            ForEach(sorted) { model in
+                                ModelRow(model: model, ramGB: ram)
                                     .environmentObject(downloader)
                                     .environmentObject(modelStore)
                             }
@@ -210,21 +219,24 @@ struct ModelBrowserView: View {
 
 private struct ModelRow: View {
     let model: HFModelEntry
+    var ramGB: Int = 999
     @EnvironmentObject var downloader: ModelDownloader
     @EnvironmentObject var modelStore: LocalModelStore
 
     private var state: DownloadState { downloader.states[model.id] ?? .idle }
     private var isInstalled: Bool { downloader.localPath(for: model) != nil }
+    private var availability: HFModelEntry.Availability { model.availability(ramGB: ramGB) }
 
     var body: some View {
         HStack(alignment: .center, spacing: 10) {
-            ProviderIconView(modelName: model.name, size: 24)
+            HFAvatarView(repoId: model.repoId, size: 28)
 
             VStack(alignment: .leading, spacing: 3) {
                 HStack(spacing: 6) {
-                    Text(model.name)
+                    // Full HuggingFace repo id (org/name), as shown on the site.
+                    Text(model.repoId)
                         .font(.body)
-                        .lineLimit(1)
+                        .lineLimit(1).truncationMode(.middle)
                     Text(model.quantization)
                         .font(.caption.weight(.medium))
                         .padding(.horizontal, 6).padding(.vertical, 2)
@@ -232,15 +244,12 @@ private struct ModelRow: View {
                                      in: RoundedRectangle(cornerRadius: 4))
                         .foregroundStyle(Color.accentColor)
                 }
-                // Publisher (HF org) + official badge
+                // Official / community badge
                 HStack(spacing: 4) {
                     Image(systemName: model.isOfficial ? "checkmark.seal.fill" : "person.crop.circle")
                         .font(.caption2)
                         .foregroundStyle(model.isOfficial ? Color.blue : Color.secondary)
-                    Text(model.publisher)
-                        .font(.caption)
-                        .foregroundStyle(.secondary)
-                    Text(model.isOfficial ? "· official" : "· community")
+                    Text(model.isOfficial ? "official" : "community")
                         .font(.caption2)
                         .foregroundStyle(.tertiary)
                 }
@@ -248,6 +257,7 @@ private struct ModelRow: View {
                     Label("\(model.sizeGB, specifier: "%.1f") GB", systemImage: "internaldrive")
                     Label("\(model.downloads.abbreviated)", systemImage: "arrow.down.circle")
                     Label("\(model.likes.abbreviated)", systemImage: "heart")
+                    availabilityBadge
                 }
                 .font(.subheadline)
                 .foregroundStyle(.tertiary)
@@ -261,16 +271,51 @@ private struct ModelRow: View {
         .padding(.vertical, 10)
         .background(Color(NSColor.controlBackgroundColor).opacity(0.5),
                      in: RoundedRectangle(cornerRadius: 10))
+        .opacity(availability == .available || isInstalled ? 1 : 0.6)
+    }
+
+    @ViewBuilder
+    private var availabilityBadge: some View {
+        switch availability {
+        case .available: EmptyView()
+        case .tooBig(let need):
+            Text("Needs \(need) GB").font(.caption2.weight(.medium))
+                .padding(.horizontal, 5).padding(.vertical, 1)
+                .background(Color.orange.opacity(0.15), in: Capsule()).foregroundStyle(.orange)
+        case .unsupported:
+            Text("Unsupported").font(.caption2.weight(.medium))
+                .padding(.horizontal, 5).padding(.vertical, 1)
+                .background(Color.red.opacity(0.15), in: Capsule()).foregroundStyle(.red)
+        case .noBuild:
+            Text("No GGUF").font(.caption2.weight(.medium))
+                .padding(.horizontal, 5).padding(.vertical, 1)
+                .background(Color.secondary.opacity(0.15), in: Capsule()).foregroundStyle(.secondary)
+        }
     }
 
     @ViewBuilder
     private var actionButton: some View {
         switch state {
         case .idle:
-            if isInstalled {
+            if model.isPlaceholder {
+                // No GGUF to download — link out to the model page instead.
+                Button { NSWorkspace.shared.open(model.pageURL) } label: {
+                    Image(systemName: "arrow.up.right.square").font(.title3)
+                }
+                .buttonStyle(.plain).foregroundStyle(.secondary)
+                .help("No GGUF build — open on HuggingFace")
+            } else if isInstalled {
                 Text("Installed")
                     .font(.subheadline)
                     .foregroundStyle(.secondary)
+            } else if availability != .available {
+                // Too big for this Mac, or an architecture the engine can't run.
+                Image(systemName: "nosign")
+                    .font(.title3)
+                    .foregroundStyle(.secondary)
+                    .help(availability == .unsupported
+                          ? "This architecture isn't supported by the engine."
+                          : "This model needs more memory than this Mac has.")
             } else {
                 Button { downloader.download(model) } label: {
                     Image(systemName: "arrow.down.circle")

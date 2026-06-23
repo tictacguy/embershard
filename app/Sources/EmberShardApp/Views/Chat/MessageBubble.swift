@@ -36,6 +36,12 @@ struct MessageBubble: View {
                                    activeStage: message.isStreaming ? message.agentStageName : nil)
                 }
 
+                // Reasoning (<think>) — collapsible; auto-open while still thinking.
+                if !isUser && !message.reasoning.isEmpty {
+                    ReasoningView(text: message.reasoning,
+                                  thinking: message.isStreaming && message.content.isEmpty)
+                }
+
                 // Bubble content
                 BubbleContent(message: message, isUser: isUser, bubbleColor: appState.accentColor)
 
@@ -164,6 +170,53 @@ private struct BubbleContent: View {
             }
         }
         .textSelection(.enabled)
+    }
+}
+
+// MARK: - ReasoningView
+
+private struct ReasoningView: View {
+    let text: String
+    let thinking: Bool
+    @State private var expanded = false
+
+    var body: some View {
+        let open = expanded || thinking
+        VStack(alignment: .leading, spacing: 0) {
+            Button { withAnimation(.easeInOut(duration: 0.15)) { expanded.toggle() } } label: {
+                HStack(spacing: 7) {
+                    Image(systemName: "brain")
+                        .font(.subheadline).foregroundStyle(.secondary).frame(width: 18)
+                    Text(thinking ? "Thinking…" : "Reasoning")
+                        .font(.subheadline.weight(.medium)).foregroundStyle(.secondary)
+                    if thinking { ProgressView().controlSize(.small).padding(.leading, 2) }
+                    Spacer(minLength: 8)
+                    if !thinking {
+                        Image(systemName: "chevron.right").font(.system(size: 11, weight: .semibold))
+                            .rotationEffect(.degrees(open ? 90 : 0)).foregroundStyle(.secondary)
+                    }
+                }
+                .contentShape(Rectangle())
+            }
+            .buttonStyle(.plain)
+            .padding(.horizontal, 12).padding(.vertical, 9)
+
+            if open {
+                Divider().opacity(0.4)
+                ScrollView {
+                    Text(text)
+                        .font(.callout)
+                        .foregroundStyle(.secondary)
+                        .textSelection(.enabled)
+                        .frame(maxWidth: .infinity, alignment: .leading)
+                        .padding(12)
+                }
+                .frame(maxHeight: 240)
+            }
+        }
+        .frame(maxWidth: 520, alignment: .leading)
+        .background(Color.primary.opacity(0.03), in: RoundedRectangle(cornerRadius: 10))
+        .overlay(RoundedRectangle(cornerRadius: 10).stroke(Color.primary.opacity(0.08), lineWidth: 1))
     }
 }
 
